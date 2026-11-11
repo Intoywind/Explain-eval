@@ -45,6 +45,18 @@ models:
       input: 2.0
       output: 10.0
 
+  - name: gpt-6-luna
+    provider: openai
+    model_id: gpt-6-luna
+    # 2026-11-11 实测：temperature 只接受 1.0、top_p 和 seed 不支持，所以都不发；
+    # 能改的只有 reasoning.effort（none/low/medium/high/xhigh）和 text.verbosity（low/medium/high），都固定为默认值 medium
+    params:
+      reasoning: {effort: medium}
+      text: {verbosity: medium}
+    price_per_1m_tokens:   # OpenAI 标准价（2026-11 查询）；缓存输入 $0.01，未计入，估算偏高
+      input: 0.10
+      output: 0.50
+
   # HKUST 模型示例（填好后去掉注释）：
   # - name: hkust-xxx
   #   provider: hkust
