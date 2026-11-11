@@ -1,0 +1,18 @@
+# 密钥
+.env
+.env.*
+!.env.example
+
+# 运行结果
+results/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 系统文件
+.DS_Store
+
+# 个人准备笔记，不入库
+开工前要准备的.md

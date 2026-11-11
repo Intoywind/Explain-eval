@@ -1,0 +1,51 @@
+# explain-eval 配置
+# 密钥不写在这里：只写环境变量名，值放在 .env（已被 .gitignore 忽略）。
+
+# ---- 接口 ----
+providers:
+  hkust:
+    # HKUST GenAI API，OpenAI 兼容的 chat completions
+    url: https://hkust.azure-api.net/hkust-genai/v1/chat/completions
+    api_key_env: HKUST_GENAI_API_KEY   # 请求头 api-key: <密钥>
+    query_params: {}                   # 网关若要求 api-version 等查询参数，写在这里
+    rate_limit_per_minute: 60          # 网关限速；脚本按此控制两次请求的最小间隔
+    timeout_seconds: 300
+    default_params: {}                 # 发给该接口的默认参数（如 temperature、max_tokens）
+
+  openai:
+    # OpenAI 官方 API，用官方 Python SDK 的 Responses 接口
+    api_key_env: OPENAI_API_KEY
+    rate_limit_per_minute: null        # null = 不额外限速
+    timeout_seconds: 600
+    default_params:
+      store: false                     # 不让 OpenAI 在服务端保存这次对话
+
+# ---- 默认参数 ----
+defaults:
+  db_path: results/eval.db
+  params: {}            # 对所有模型生效的生成参数；空 = 用接口自己的默认值
+  retry:
+    max_retries: 3      # 首次失败后最多再试 3 次
+    base_wait_seconds: 5     # 第 n 次重试前等 base * 2^(n-1) 秒
+    max_wait_seconds: 60
+
+# ---- 模型 ----
+# name：命令行 --model 用的名字；provider：走哪个接口；model_id：发给接口的模型名
+# params：只对这个模型生效的参数，覆盖上面的默认值。参数名按接口自己的叫法：
+#   openai（Responses）：temperature、max_output_tokens、reasoning: {effort: ...}
+#   hkust（chat completions）：temperature、max_tokens
+# price_per_1m_tokens：每百万 token 的美元价格，只用于估算费用；不填则不估算
+models:
+  - name: gpt-6.1-sol
+    provider: openai
+    model_id: gpt-6.1-sol
+    params: {}
+    price_per_1m_tokens:   # OpenAI 标准价（2026-11 查询）；推理 token 按输出价计；未计缓存折扣，估算偏高
+      input: 2.0
+      output: 10.0
+
+  # HKUST 模型示例（填好后去掉注释）：
+  # - name: hkust-xxx
+  #   provider: hkust
+  #   model_id: xxx
+  #   params: {}
