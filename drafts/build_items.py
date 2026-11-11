@@ -48,7 +48,7 @@ kp(code="ECON-003", course="ECON1221", knowledge_point="乘数 1/(1 − c1 − b
    material=("C = c0 + c1(Y - T), I = b0 + b1*Y - b2*i, with the interest rate i fixed.\n"
              "Equilibrium output: Y = 1/(1 - c1 - b1) * (autonomous spending), where autonomous spending = c0 - c1*T + b0 - b2*i + G.\n"
              "Multiplier = 1/(1 - c1 - b1). Change in output: ΔY = Multiplier * Δ(autonomous spending)."),
-   knowledge_errors=["乘数或其条件说错（应为 0 < c1 + b1 < 1 时乘数大于 1）"],
+   knowledge_errors=["乘数公式写错，或把公式成立的条件说反（公式在 c1 + b1 < 1 时成立；写成 0 ≤ c1 + b1 < 1 或 0 < c1 + b1 < 1 都不算错，说成 c1 + b1 大于或等于 1 时也成立才算错）"],
    readers={
      "零基础": dict(learned=["解一元一次方程", "等比数列求和"],
                   not_learned=["边际消费倾向", "自主支出", "均衡产出", "乘数"]),
@@ -416,7 +416,7 @@ STEPS = {
    st("说明 c1、b1 各是什么", ZERO),
    st("说明自主支出指什么（和产出无关的那部分需求）", ZERO),
    st("说清 1 − c1 − b1 和储蓄是不是一回事、差在哪"),
-   st("给出乘数大于 1 的条件（0 < c1 + b1 < 1）"),
+   st("交代公式成立的条件（c1 + b1 < 1，这样每一轮新增的需求才会比上一轮少）"),
    st("交代前提：利率固定"),
  ],
  "ECON-004": [
