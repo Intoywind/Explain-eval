@@ -1,7 +1,7 @@
 """人工盲打：导出盲打网页，以及把人工结果和裁判对比。
 
 python -m src.blind export --n 50 --seed 1 --out blind/round1/
-python -m src.blind compare blind/round1/key.json <导出的 JSON> [--judge-prompt prompts/judge_v1.md] [--out 报告.md]
+python -m src.blind compare blind/round1/key.json <导出的 JSON> [--judge-prompt prompts/judge_v2.md] [--out 报告.md]
 
 网页是一个自带全部内容的 HTML 文件，不依赖网络：Markdown 由 Python 的 markdown 库预先转成 HTML，
 \\( \\) 和 \\[ \\] 里的公式由 latex2mathml 转成 MathML（浏览器原生显示）；转不了的公式原样显示 TeX 源码。
@@ -410,7 +410,7 @@ def main(argv=None) -> int:
     c = sub.add_parser("compare", help="人工结果和裁判对比")
     c.add_argument("key")
     c.add_argument("human")
-    c.add_argument("--judge-prompt", default="prompts/judge_v1.md")
+    c.add_argument("--judge-prompt", default="prompts/judge_v2.md")
     c.add_argument("--out", help="Markdown 输出路径，默认和 key.json 同目录的 compare.md")
     c.add_argument("--holdout", action="store_true")
     args = ap.parse_args(argv)

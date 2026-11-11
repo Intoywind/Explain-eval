@@ -232,6 +232,33 @@ CREATE TABLE IF NOT EXISTS known_judgments (
     status           TEXT NOT NULL CHECK (status IN ('ok', 'error', 'needs_review')),
     error            TEXT
 );
+
+-- 裁判验收样例（tests/judge_fixtures/）的裁判结果：只用来验收裁判，不进入任何评分统计
+CREATE TABLE IF NOT EXISTS fixture_judgments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    judge_run_id     TEXT NOT NULL,
+    fixture_id       TEXT NOT NULL,      -- A1 … E2
+    item_id          TEXT NOT NULL,
+    source_call_id   INTEGER,            -- 样例由哪份真实回答改成
+    text_sha256      TEXT NOT NULL,
+    judge_model_name TEXT NOT NULL,
+    judge_model_version TEXT,
+    prompt_file      TEXT NOT NULL,
+    prompt_sha256    TEXT NOT NULL,
+    rubric_sha256    TEXT NOT NULL,
+    request_sha256   TEXT NOT NULL,
+    params_used      TEXT NOT NULL,
+    raw_output       TEXT,
+    parsed_json      TEXT,
+    flags            TEXT,               -- 含 rejudge_history
+    expect           TEXT NOT NULL,      -- manifest 里的预期
+    actual           TEXT,               -- 与预期对应的实际值
+    passed           INTEGER,            -- 1 符合预期 / 0 不符合 / NULL 没有可比的结果
+    input_tokens INTEGER, output_tokens INTEGER, attempts INTEGER, latency_s REAL,
+    created_at       TEXT NOT NULL,
+    status           TEXT NOT NULL CHECK (status IN ('ok', 'error', 'needs_review')),
+    error            TEXT
+);
 """
 
 INDEX_SQL = """
@@ -431,3 +458,8 @@ def upsert_rule_check(conn, row: dict) -> None:
 def insert_known(conn, row: dict) -> None:
     with conn:
         _insert(conn, "known_judgments", row)
+
+
+def insert_fixture(conn, row: dict) -> None:
+    with conn:
+        _insert(conn, "fixture_judgments", row)

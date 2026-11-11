@@ -1,6 +1,6 @@
 """两份 Skill 的比较报告。
 
-python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-sol --judge-prompt prompts/judge_v1.md --out reports/
+python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-sol --judge-prompt prompts/judge_v2.md --out reports/
 
 - 只比较两份 Skill 都有裁判结果、且重复次数相同的条目；不满足的列出来，不计入。
 - 先在条目内把几次重复取平均，再在条目之间取平均（每条条目权重相同）。知识不通过的那次按 0 分进入平均。
@@ -131,7 +131,10 @@ per_item AS (  -- 条目内先对几次重复取平均；知识不通过的那�
          avg(CASE WHEN knowledge_pass = 1 THEN 1.0 * gate_num / gate_den END) AS gate_ex,
          avg(CASE WHEN knowledge_pass = 1 THEN 1.0 * step_num / step_den END) AS step_ex,
          sum(1 - knowledge_pass) AS n_kfail, sum(incomplete) AS n_incomplete, sum(gate_all) AS n_gate_all,
-         avg(n_gaps_blocking) AS gaps_blocking, avg(n_redundancy) AS redundancy, avg(char_count) AS chars
+         avg(n_gaps_blocking) AS gaps_blocking,
+         -- 冗余只统计有前置版；零基础版的记录留在库里，不进统计
+         CASE WHEN b.item_id LIKE '%有前置' THEN avg(n_redundancy) END AS redundancy,
+         avg(char_count) AS chars
   FROM base b JOIN eligible e USING (item_id)
   GROUP BY b.item_id, b.side
 ),
@@ -183,9 +186,27 @@ JOIN judgments j ON j.id = (
        AND x.prompt_sha256 = {_q(prompt.sha256)} AND x.rubric_sha256 = s.rubric_sha256)
 WHERE j.status = 'needs_review' AND c.model_name = {_q(args.model)} AND (({cond_a}) OR ({cond_b}))
 ORDER BY side, c.item_id, c.repeat_idx""")
-    L += [f"## 待复核（needs_review）[{tr}]", "",
-          f"重判 2 次后证据仍不合格的裁判结果，不计分、不进以下任何统计，需要人工看：A {sum(r['side'] == 'A' for r in rv)} 份，"
-          f"B {sum(r['side'] == 'B' for r in rv)} 份。这些回答所在的条目如果因此两边重复次数不同，会出现在第 0 节的不计入清单里。", ""]
+    tg, grp = R.q("各组（Skill × 被测模型）的裁判结果份数：ok / needs_review / error", f"""SELECT CASE {' '.join(f"WHEN c.skill_file LIKE 'skills/{d}/%' THEN '{d}'" for d in PER_COURSE_SKILL_DIRS)}
+            ELSE c.skill_file END AS skill_group,
+       c.model_name, count(*) AS n_answers,
+       coalesce(sum(j.status = 'ok'), 0) AS n_ok, coalesce(sum(j.status = 'needs_review'), 0) AS n_review,
+       coalesce(sum(j.status = 'error'), 0) AS n_error,
+       sum(j.id IS NULL) AS n_unjudged
+FROM current_calls c
+JOIN items_snapshot s ON s.item_id = c.item_id
+LEFT JOIN judgments j ON j.id = (
+     SELECT max(x.id) FROM judgments x
+     WHERE x.call_id = c.id AND x.judge_model_name = {_q(judge_name)}
+       AND x.prompt_sha256 = {_q(prompt.sha256)} AND x.rubric_sha256 = s.rubric_sha256)
+GROUP BY skill_group, c.model_name ORDER BY skill_group, c.model_name""")
+    L += [f"## 待复核（needs_review）", "",
+          "重判 2 次后证据仍不合格的裁判结果，不计分、不进以下任何统计，需要人工看。", "",
+          f"**各组份数**（库里所有当前回答，不限于本报告的 A、B）[{tg}]", "",
+          "| Skill 组 | 被测模型 | 当前回答 | ok | needs_review | error | 未评 |", "|---|---|---|---|---|---|---|"]
+    L += [f"| {g['skill_group']} | {g['model_name']} | {g['n_answers']} | {g['n_ok']} | {g['n_review']} | {g['n_error']} | {g['n_unjudged']} |"
+          for g in grp]
+    L += ["", f"**本报告 A、B 里的待复核清单** [{tr}]：A {sum(r['side'] == 'A' for r in rv)} 份，B {sum(r['side'] == 'B' for r in rv)} 份。"
+          "这些回答所在的条目如果因此两边重复次数不同，会出现在第 0 节的不计入清单里。", ""]
     if rv:
         L += ["| 边 | 回答 id（calls.id） | 条目 | 第几次 | 裁判记录 id | 不合格原因 |", "|---|---|---|---|---|---|"]
         L += [f"| {r['side']} | {r['call_id']} | {r['item_id']} | {r['repeat_idx']} | {r['judgment_id']} | {_md(r['reasons'])} |" for r in rv]
@@ -248,6 +269,33 @@ FROM paired WHERE gate_ex_a IS NOT NULL AND gate_ex_b IS NOT NULL""")
           "| | 卡点 A | 卡点 B | 卡点差 | 步骤 A | 步骤 B | 步骤差 | 条目数 |", "|---|---|---|---|---|---|---|---|",
           f"| 主表 [{t2}][{t3}] | {_f(sg['mean_a'])} | {_f(sg['mean_b'])} | {_d(sg['mean_diff'])} | {_f(ss['mean_a'])} | {_f(ss['mean_b'])} | {_d(ss['mean_diff'])} | {sg['n']} |",
           f"| 排除知识不通过 [{t5}] | {_f(ex['gate_a'])} | {_f(ex['gate_b'])} | {_d(ex['gate_diff'])} | {_f(ex['step_a'])} | {_f(ex['step_b'])} | {_d(ex['step_diff'])} | {ex['n_both']} |", ""]
+
+    # 3b. 清单外备注
+    tn, notes = R.q("裁判 note 以“清单外”开头的结果（清单外的事实错误，不触发知识错误）", f"""SELECT CASE WHEN {cond_a} THEN 'A' ELSE 'B' END AS side,
+       c.item_id, c.id AS call_id, c.repeat_idx, j.id AS judgment_id, j.status,
+       json_extract(j.parsed_json, '$.knowledge_error.note') AS k_note,
+       json_extract(j.parsed_json, '$.incomplete.note') AS i_note
+FROM current_calls c
+JOIN items_snapshot s ON s.item_id = c.item_id
+JOIN judgments j ON j.id = (
+     SELECT max(x.id) FROM judgments x
+     WHERE x.call_id = c.id AND x.status IN ('ok', 'needs_review') AND x.judge_model_name = {_q(judge_name)}
+       AND x.prompt_sha256 = {_q(prompt.sha256)} AND x.rubric_sha256 = s.rubric_sha256)
+WHERE c.model_name = {_q(args.model)} AND (({cond_a}) OR ({cond_b}))
+  AND (ltrim(coalesce(json_extract(j.parsed_json, '$.knowledge_error.note'), '')) LIKE '清单外%'
+    OR ltrim(coalesce(json_extract(j.parsed_json, '$.incomplete.note'), '')) LIKE '清单外%')
+ORDER BY c.item_id, side, c.repeat_idx""")
+    L += [f"## 3b. 清单外备注（供复核）[{tn}]", "",
+          "裁判在 note 里以“清单外：”开头记下的清单外事实错误。它们不触发知识错误、不影响任何分数。"
+          f"A {sum(r['side'] == 'A' for r in notes)} 份，B {sum(r['side'] == 'B' for r in notes)} 份。", ""]
+    if notes:
+        L += ["| 条目 | 边 | 回答 id（calls.id） | 第几次 | 裁判状态 | note 原文 |", "|---|---|---|---|---|---|"]
+        for r in notes:
+            txt = "；".join(n for n in (r["k_note"], r["i_note"]) if n and n.lstrip().startswith("清单外"))
+            L.append(f"| {r['item_id']} | {r['side']} | {r['call_id']} | {r['repeat_idx']} | {r['status']} | {_md(txt)} |")
+    else:
+        L.append("（无）")
+    L.append("")
 
     # 4. 卡点全答上
     t6, ga = R.q("“卡点全答上”的回答占比", f"""{base}
@@ -346,17 +394,19 @@ ORDER BY b.item_id, b.side, b.repeat_idx""")
 
     # 9. 辅助指标
     t9, ax = R.q("辅助指标：逐条相减后的平均差", f"""{base}
-SELECT count(*) AS n, avg(gaps_diff) AS gaps_diff, avg(red_diff) AS red_diff, avg(chars_diff) AS chars_diff
+SELECT count(*) AS n, avg(gaps_diff) AS gaps_diff, avg(red_diff) AS red_diff, count(red_diff) AS n_red_items,
+       avg(chars_diff) AS chars_diff
 FROM paired""")
     t10, axs = R.q("辅助指标：A、B 各自的条目平均", f"""{base}
 SELECT side, avg(gaps_blocking) AS gaps_blocking, avg(redundancy) AS redundancy, avg(chars) AS chars
 FROM per_item GROUP BY side ORDER BY side""")
     ax = ax[0]
     axd = {r["side"]: r for r in axs}
-    L += ["## 9. 辅助指标", "", "每份回答先数，条目内平均，再逐条 B − A，最后取平均。gaps 和 redundancy 只数引句通过校验的。", "",
+    L += ["## 9. 辅助指标", "", "每份回答先数，条目内平均，再逐条 B − A，最后取平均。gaps 和 redundancy 只数引句通过校验的。",
+          f"redundancy 只统计 id 以“有前置”结尾的条目（本报告 {ax['n_red_items']} 条）；零基础版的记录保留在库里，不进统计。", "",
           "| 指标 | A | B | 平均差 |", "|---|---|---|---|"]
     for key, dk, lab, nd in (("gaps_blocking", "gaps_diff", "“读者没法往下读”的 gaps 数", 2),
-                             ("redundancy", "red_diff", "redundancy 处数", 2), ("chars", "chars_diff", "篇幅（字符）", 0)):
+                             ("redundancy", "red_diff", "redundancy 处数（只算有前置版）", 2), ("chars", "chars_diff", "篇幅（字符）", 0)):
         L.append(f"| {lab} | {_f((axd.get('A') or {}).get(key) if 'A' in axd else None, nd)} | "
                  f"{_f((axd.get('B') or {}).get(key) if 'B' in axd else None, nd)} | {_d(ax[dk], nd)} |")
     L += [f"\n[{t10}][{t9}]", ""]

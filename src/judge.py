@@ -1,10 +1,11 @@
 """裁判：给已入库的讲解逐项判断，由代码算三档结果。
 
-python -m src.judge --prompt prompts/judge_v1.md                 # 评所有还没被这个裁判、这版请求评过的当前回答
-python -m src.judge --prompt prompts/judge_v1.md --dry-run       # 只打印第一条完整的裁判请求，不调 API
-python -m src.judge --prompt prompts/judge_v1.md --skill skills/general_v1.md --model gpt-6.1-sol --limit 5
-python -m src.judge --prompt prompts/judge_v1.md --call-ids 3,40,77
-python -m src.judge --known --prompt prompts/judge_v1.md         # 已知样本检查（data/known_cases.jsonl），不进统计
+python -m src.judge --prompt prompts/judge_v2.md                 # 评所有还没被这个裁判、这版请求评过的当前回答
+python -m src.judge --prompt prompts/judge_v2.md --dry-run       # 只打印第一条完整的裁判请求，不调 API
+python -m src.judge --prompt prompts/judge_v2.md --skill skills/general_v1.md --model gpt-6.1-sol --limit 5
+python -m src.judge --prompt prompts/judge_v2.md --call-ids 3,40,77
+python -m src.judge --known --prompt prompts/judge_v2.md         # 已知样本检查（data/known_cases.jsonl），不进统计
+python -m src.judge --fixtures --prompt prompts/judge_v2.md      # 裁判验收样例（tests/judge_fixtures/），存 fixture_judgments，不进统计
 
 “当前回答”见 db.current_calls：同一个（条目、被测模型、Skill 文件、第几次重复）取最新的成功记录。
 断点续跑：同一份回答、同一个裁判模型、同一个裁判请求哈希（prompt、条目判分清单、参数、讲解任何一处变了都会变）
@@ -286,7 +287,7 @@ def _now() -> str:
 
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="python -m src.judge", description="给已入库的讲解评分")
-    ap.add_argument("--prompt", required=True, help="裁判 prompt 文件，例如 prompts/judge_v1.md")
+    ap.add_argument("--prompt", required=True, help="裁判 prompt 文件，例如 prompts/judge_v2.md")
     ap.add_argument("--items", default="data/items.jsonl", help="评分用的条目文件，默认 data/items.jsonl")
     ap.add_argument("--holdout", action="store_true", help="允许读取保留集")
     ap.add_argument("--skill", help="只评这份 Skill 的回答（文件路径，或 original / original_eval）")
@@ -295,6 +296,8 @@ def parse_args(argv):
     ap.add_argument("--limit", type=int, help="最多评几份（跳过的不算）")
     ap.add_argument("--workers", type=int, default=4, help="并发数，默认 4；限速仍按 config")
     ap.add_argument("--known", action="store_true", help="已知样本检查：评 data/known_cases.jsonl，不进统计")
+    ap.add_argument("--fixtures", action="store_true",
+                    help="裁判验收样例：评 tests/judge_fixtures/manifest.json 里的样例，结果存 fixture_judgments 表，不进统计")
     ap.add_argument("--dry-run", action="store_true", help="只打印第一条完整的裁判请求，不调 API")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     return ap.parse_args(argv)
@@ -320,6 +323,8 @@ def _main(args, argv) -> int:
 
     if args.known:
         return _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path)
+    if args.fixtures:
+        return _main_fixtures(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path)
 
     # 选回答。dry-run 只读打开，不建表不写库
     if args.dry_run:
@@ -565,6 +570,127 @@ def _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> 
     conn.close()
     print(f"已知样本 {len(built)} 条，不一致 {n_mismatch} 条（这些记录存在 known_judgments 表，不进入任何统计）")
     return 0
+
+
+# ---------------- 裁判验收样例 ----------------
+
+FIXTURE_DIR = ROOT / "tests" / "judge_fixtures"
+
+
+def check_fixture(expect: dict, parsed, status: str) -> tuple[dict, bool | None]:
+    """按 manifest 的 expect 逐项取实际值并比较。返回（实际值，是否全部符合）；没有解析结果时返回 None。
+    needs_review 的结果也照样比较（它有解析结果），但调用方要单独标出来。"""
+    if parsed is None:
+        return {}, None
+    act, ok = {}, True
+    if "knowledge_found" in expect:
+        act["knowledge_found"] = parsed.knowledge_found
+        ok &= parsed.knowledge_found == expect["knowledge_found"]
+    if "which" in expect:
+        act["which"] = parsed.knowledge_which
+        ok &= sorted(w.strip() for w in parsed.knowledge_which) == sorted(expect["which"])
+    if "quote_contains" in expect:
+        qs = [q for q, v in zip(parsed.data["knowledge_error"].get("quotes") or [], parsed.knowledge_quotes_valid) if v]
+        act["valid_quotes"] = qs
+        ok &= any(expect["quote_contains"] in q for q in qs)
+    if "gate" in expect:
+        g = next(g for g in parsed.gate if g.id == expect["gate"])
+        act[f"{g.id}.answered"] = g.answered
+        ok &= g.answered == expect["answered"]
+    if "step" in expect:
+        st = next(x for x in parsed.steps if x.id == expect["step"])
+        act[f"{st.id}.done"] = st.done
+        ok &= st.done == expect["done"]
+    if "incomplete" in expect:
+        act["incomplete"] = parsed.incomplete_found
+        ok &= parsed.incomplete_found == expect["incomplete"]
+    if "missing_contains" in expect:
+        act["incomplete.missing"] = parsed.incomplete_missing
+        ok &= any(expect["missing_contains"] in m for m in parsed.incomplete_missing)
+    if "zeroed" in expect:
+        if status == "ok":
+            sc = score(parsed)
+            zeroed = not sc.knowledge_pass and sc.gate_num == 0 and sc.step_num == 0
+            act["zeroed"] = zeroed
+            act["scores"] = f"卡点 {sc.gate_num}/{sc.gate_den}，步骤 {sc.step_num}/{sc.step_den}"
+            ok &= zeroed == expect["zeroed"]
+        else:
+            act["zeroed"] = None
+            ok = False
+    return act, bool(ok)
+
+
+def _main_fixtures(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> int:
+    manifest = json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
+    built = []
+    for fx in manifest:
+        text = (FIXTURE_DIR / fx["text_file"]).read_text(encoding="utf-8")
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != fx["text_sha256"]:
+            raise UsageError(f"{fx['text_file']} 与 manifest 的 sha256 不一致，请先重新生成样例")
+        item = items_by_id.get(fx["item_id"])
+        if item is None:
+            raise UsageError(f"样例 {fx['id']} 的条目 {fx['item_id']} 不在条目文件里")
+        user = fill_user(prompt.user_template, item, text)
+        check_no_leak(item, cfg, user, text)
+        built.append((fx, text, item, user))
+    if args.dry_run:
+        fx, text, item, user = built[0]
+        print(f"样例 {len(built)} 份；第一份（{fx['id']}，{item['id']}）的裁判请求：")
+        print("[system]\n" + prompt.system + "\n[user]\n" + user)
+        return 0
+
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+    providers.require_key(jcfg["provider"], cfg)
+    conn = db.connect(db_path)
+    run_id = "F" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+    print(f"judge_run_id {run_id}｜裁判 {jcfg['name']}｜prompt {prompt.rel}（{prompt.sha256[:12]}）｜样例 {len(built)} 份"
+          f"｜结果存 fixture_judgments，不进统计")
+
+    def work(b):
+        fx, text, item, user = b
+        return run_judge(jcfg, cfg, prompt.system, user, item, text,
+                         log=lambda m, fid=fx["id"]: print(f"  [{fid}] {m.strip()}"))
+
+    tin = tout = n_pass = 0
+    results = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        futs = {ex.submit(work, b): b for b in built}
+        for fut in as_completed(futs):
+            fx, text, item, user = futs[fut]
+            res = fut.result()
+            results[fx["id"]] = (fx, text, item, user, res)
+    for fx, text, item, user, res in (results[f["id"]] for f in manifest):
+        tin += res.input_tokens
+        tout += res.output_tokens
+        act, passed = check_fixture(fx["expect"], res.parsed, res.status)
+        n_pass += bool(passed) and res.status == "ok"
+        row = {"judge_run_id": run_id, "fixture_id": fx["id"], "item_id": item["id"],
+               "source_call_id": fx["source_call_id"], "text_sha256": fx["text_sha256"],
+               "judge_model_name": jcfg["name"], "judge_model_version": res.last.model_version if res.last else None,
+               "prompt_file": prompt.rel, "prompt_sha256": prompt.sha256, "rubric_sha256": rubric_hash(item),
+               "request_sha256": db.request_hash(prompt.system, user, res.last.params_sent if res.last else params),
+               "params_used": {"sent": res.last.params_sent if res.last else params,
+                               "reported_by_api": res.last.params_reported if res.last else None},
+               "raw_output": res.raw,
+               "parsed_json": parsed_json(res.parsed) if res.parsed is not None else None,
+               "flags": {**(res.parsed.flags() if res.parsed is not None else {}),
+                         "rejudge_history": res.history or []},
+               "expect": fx["expect"], "actual": act, "passed": None if passed is None else int(passed),
+               "input_tokens": res.input_tokens, "output_tokens": res.output_tokens,
+               "attempts": res.attempts, "latency_s": res.latency_s, "created_at": _now(),
+               "status": res.status, "error": res.error}
+        db.insert_fixture(conn, row)
+        verdict = {True: "符合预期", False: "不符合预期", None: "无结果"}[passed]
+        rj = f"｜重判 {res.n_rejudge} 次" if res.n_rejudge else ""
+        print(f"{fx['id']} {item['id']:<16} {res.status:<12} {verdict}{rj}｜实际 {json.dumps(act, ensure_ascii=False)}"
+              + (f"｜{res.error}" if res.error else ""))
+    conn.close()
+    cost = estimate_cost(jcfg, tin, tout)
+    print("-" * 72)
+    print(f"样例 {len(built)} 份，状态 ok 且符合预期 {n_pass} 份｜输入 {tin} tokens，输出 {tout} tokens｜费用 "
+          + (f"约 ${cost:.4f}（按标价）" if cost is not None else "未估算"))
+    return 0 if n_pass == len(built) else 1
 
 
 if __name__ == "__main__":

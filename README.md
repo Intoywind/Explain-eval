@@ -17,7 +17,8 @@ data/
   examples.jsonl   items.jsonl 的前 2 条，用于试跑
 drafts/            条目生成脚本和旧版存档（程序不读）
 prompts/
-  judge_v1.md      裁判 prompt（分 SYSTEM / USER 两段，{{双花括号}} 是占位符）；改动就新建 judge_v2.md
+  judge_v1.md      裁判 prompt 第 1 版（保留不动）
+  judge_v2.md      当前使用的裁判 prompt（分 SYSTEM / USER 两段，{{双花括号}} 是占位符；相对 v1 的改动写在文件头注释里）
 src/
   schema.py        条目字段定义和校验
   providers.py     统一调用 HKUST GenAI API / OpenAI API（限速、重试、密钥脱敏）
@@ -124,11 +125,12 @@ sqlite3 -header -column results/eval.db "select item_id, model_version, status, 
 ## 裁判（第二轮）
 
 ```bash
-python -m src.judge --prompt prompts/judge_v1.md --dry-run      # 打印第一条完整的裁判请求
-python -m src.judge --prompt prompts/judge_v1.md                # 评所有还没评过的当前回答
-python -m src.judge --prompt prompts/judge_v1.md --skill skills/general_v1.md --model gpt-6.1-sol --limit 5
-python -m src.judge --prompt prompts/judge_v1.md --call-ids 16,31
-python -m src.judge --known --prompt prompts/judge_v1.md        # 已知样本检查（data/known_cases.jsonl，不存在就跳过）
+python -m src.judge --prompt prompts/judge_v2.md --dry-run      # 打印第一条完整的裁判请求
+python -m src.judge --prompt prompts/judge_v2.md                # 评所有还没评过的当前回答
+python -m src.judge --prompt prompts/judge_v2.md --skill skills/general_v1.md --model gpt-6.1-sol --limit 5
+python -m src.judge --prompt prompts/judge_v2.md --call-ids 16,31
+python -m src.judge --known --prompt prompts/judge_v2.md        # 已知样本检查（data/known_cases.jsonl，不存在就跳过）
+python -m src.judge --fixtures --prompt prompts/judge_v2.md     # 裁判验收样例（tests/judge_fixtures/，先运行其中的 make_fixtures.py 生成）
 ```
 
 - 裁判模型在 `config.yaml` 的 `judge:` 下配置。gpt-6.1-terra 在默认推理强度下不接受 temperature，所以不发；接口回报的实际参数存进 `judgments.params_used`。
@@ -162,6 +164,7 @@ python -m src.judge --known --prompt prompts/judge_v1.md        # 已知样本�
 - `judge_extra_steps` / `judge_gaps` / `judge_redundancy`：清单外步骤、跳步、冗余，每条带 `quote_valid`。
 - `rule_checks`：每份回答的字符数、用到了哪些“没学过”的词和第一次出现的位置（只做字符串匹配，仅供参考）。`python -m src.rules` 单独刷新，裁判运行时也会自动刷新。
 - `known_judgments`：已知样本检查的记录，不进入任何统计。
+- `fixture_judgments`：裁判验收样例的记录（含 manifest 里的预期、实际值、是否符合、重判记录），不进入任何统计。
 
 ## 人工盲打
 
@@ -179,12 +182,13 @@ python -m src.blind compare blind/round1/key.json ~/Downloads/blind_round1_xxx.j
 ## 两份 Skill 的比较报告
 
 ```bash
-python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-sol --judge-prompt prompts/judge_v1.md --out reports/
+python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-sol --judge-prompt prompts/judge_v2.md --out reports/
 ```
 
 - 只比较两边都有裁判结果、且重复次数相同的条目；其余列出来，不计入。
 - 先在条目内对几次重复取平均（知识不通过的那次按 0），再在条目间取平均。
 - 每个数字后面的 [Qn] 指向文末附录的 SQL，可以直接在 `sqlite3 results/eval.db` 里运行。报告运行时会把当前条目元数据写进 `items_snapshot`、`items_gate`、`items_steps` 三张表供 SQL 关联。
+- 单列：各组的 needs_review 份数和清单；裁判 note 以“清单外：”开头的结果（条目、回答 id、note 原文）。
 - 只报数字，不做显著性检验，不下结论。
 
 ## 测试

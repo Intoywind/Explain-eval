@@ -1,0 +1,199 @@
+[
+  {
+    "id": "A1",
+    "group": "A",
+    "item_id": "COMP-005-零基础",
+    "source_call_id": 55,
+    "source_sha256": "3f5c7d4861c2562a420203c039c544a924d77c4299f6477faccdbfe87784c10a",
+    "text_file": "A1.md",
+    "text_sha256": "c30803b04ec5331c638f1d1f46b876e6acd18837a8e755b3be2861e03d870675",
+    "edits": [
+      "在讲独立性的那句后面加一句先提误区再否定的话"
+    ],
+    "diff_file": "diffs/A1.diff",
+    "expect": {
+      "knowledge_found": false
+    },
+    "expect_text": "不触发知识错误（讲解最终主张“不要求独立”，误区是先提后否定）"
+  },
+  {
+    "id": "A2",
+    "group": "A",
+    "item_id": "COMP-005-零基础",
+    "source_call_id": 55,
+    "source_sha256": "3f5c7d4861c2562a420203c039c544a924d77c4299f6477faccdbfe87784c10a",
+    "text_file": "A2.md",
+    "text_sha256": "bfb48ea14a167c6389128b0728b6acd0f7e4f6b086fffc5daba86b784a0a2a09",
+    "edits": [
+      "把讲独立性的那句改成错误说法"
+    ],
+    "diff_file": "diffs/A2.diff",
+    "expect": {
+      "knowledge_found": true,
+      "which": [
+        "说成需要独立才成立"
+      ],
+      "quote_contains": "只有在 X、Y 独立时才成立"
+    },
+    "expect_text": "触发知识错误，which 是清单原文“说成需要独立才成立”，引句是改后的那一句"
+  },
+  {
+    "id": "B1",
+    "group": "B",
+    "item_id": "IEDA-002-零基础",
+    "source_call_id": 67,
+    "source_sha256": "1409b4908055d97c74d07fa213b0b6176acbbddbedc2786d5dd8ebe654067975",
+    "text_file": "B1.md",
+    "text_sha256": "1409b4908055d97c74d07fa213b0b6176acbbddbedc2786d5dd8ebe654067975",
+    "edits": [
+      "无改动（真实回答原样）"
+    ],
+    "diff_file": null,
+    "expect": {
+      "step": "s3",
+      "done": true
+    },
+    "expect_text": "s3“先比较交货期和订货周期的长短，再决定怎么算”踩中"
+  },
+  {
+    "id": "B2",
+    "group": "B",
+    "item_id": "IEDA-002-零基础",
+    "source_call_id": 67,
+    "source_sha256": "1409b4908055d97c74d07fa213b0b6176acbbddbedc2786d5dd8ebe654067975",
+    "text_file": "B2.md",
+    "text_sha256": "ed46431228cf915c1751640c24eb9b2fbf449f079b1b299e01a658f78c0cd563",
+    "edits": [
+      "删掉开头拿“交货时间较长”解释第二问为什么要算在途货的句子",
+      "删掉第一问里“2 周短于 2.6 周的订货周期，所以不用算在途货”的句子",
+      "删掉第二问里“每隔 2.6 周订一批而每批要等 6 周，所以前面有订单在路上”的句子",
+      "文末加一句事后补充的比较",
+      "删掉第二问里“再早一批已经等待7.8周，超过6周，已经到货。因此，”（到货时间表保留）"
+    ],
+    "diff_file": "diffs/B2.diff",
+    "expect": {
+      "step": "s3",
+      "done": false
+    },
+    "expect_text": "s3 没踩中（两件事只在文末并列出现，没有把比较当作决定算法的理由）"
+  },
+  {
+    "id": "C1",
+    "group": "C",
+    "item_id": "IEDA-003-零基础",
+    "source_call_id": 73,
+    "source_sha256": "2257a66d71ff767bb14db96b2b42e06f599f63b8dde0de91625a401b20aa2dd8",
+    "text_file": "C1.md",
+    "text_sha256": "2257a66d71ff767bb14db96b2b42e06f599f63b8dde0de91625a401b20aa2dd8",
+    "edits": [
+      "无改动（真实回答原样）"
+    ],
+    "diff_file": null,
+    "expect": {
+      "step": "s3",
+      "done": true
+    },
+    "expect_text": "s3“说明多备一份什么时候划算”踩中"
+  },
+  {
+    "id": "C2",
+    "group": "C",
+    "item_id": "IEDA-003-零基础",
+    "source_call_id": 73,
+    "source_sha256": "2257a66d71ff767bb14db96b2b42e06f599f63b8dde0de91625a401b20aa2dd8",
+    "text_file": "C2.md",
+    "text_sha256": "3a47f30b4758f53d9672908987834470b2caa4a92b3446d21142cf890502c360",
+    "edits": [
+      "第 2 节：从“先不背公式……要不要再加一份？”到“只要期望新增利润为正……>0”整段，换成一句“接下来解释为什么多备一份划算。”，保留其中记号 Q、D 的说明和 F(Q) 的定义，后面直接接“整理得：F(Q)<Cu/(Cu+Co)”",
+      "删掉临界比率之后“若 F(Q)<CR 多备一份仍能增加期望利润……”三条",
+      "删掉第 3 节末尾“### 用‘多备一份’核对”整个小节（用 89→90、90→91 的期望新增利润说明值不值得加）",
+      "临界比率定义句改成“它是一个累计概率门槛。”",
+      "文末“少订损失越大，就越值得多备，门槛也越高。”改成“少订损失越大，门槛也越高。”"
+    ],
+    "diff_file": "diffs/C2.diff",
+    "expect": {
+      "step": "s3",
+      "done": false
+    },
+    "expect_text": "s3 没踩中（只预告“接下来解释为什么多备一份划算”，后面直接接计算）"
+  },
+  {
+    "id": "D1",
+    "group": "D",
+    "item_id": "ECON-001-零基础",
+    "source_call_id": 91,
+    "source_sha256": "5faa902dd468f0a1d24eaebbed84d9d474b9a9e78833885031c256906d9fd8b4",
+    "text_file": "D1.md",
+    "text_sha256": "5faa902dd468f0a1d24eaebbed84d9d474b9a9e78833885031c256906d9fd8b4",
+    "edits": [
+      "无改动（真实回答原样）"
+    ],
+    "diff_file": null,
+    "expect": {
+      "knowledge_found": false,
+      "gate": "q1",
+      "answered": false
+    },
+    "expect_text": "知识通过；卡点 q1 没答上（没讲两边不相等时利率怎么动）"
+  },
+  {
+    "id": "D2",
+    "group": "D",
+    "item_id": "ECON-001-零基础",
+    "source_call_id": 91,
+    "source_sha256": "5faa902dd468f0a1d24eaebbed84d9d474b9a9e78833885031c256906d9fd8b4",
+    "text_file": "D2.md",
+    "text_sha256": "62576fe4163d0bb6aeebd4337b3de49e291406c169337385234ec01d8a9a99e4",
+    "edits": [
+      "在第 4 节“解题的任务：找出一个利率……”那句之后插入指定段落"
+    ],
+    "diff_file": "diffs/D2.diff",
+    "expect": {
+      "knowledge_found": false,
+      "gate": "q1",
+      "answered": true
+    },
+    "expect_text": "知识通过；卡点 q1 答上"
+  },
+  {
+    "id": "E1",
+    "group": "E",
+    "item_id": "ECON-004-零基础",
+    "source_call_id": 19,
+    "source_sha256": "bd8853577398bbab939109ab0f326cc00383fc890ffe1fa0f991d9fe231d6155",
+    "text_file": "E1.md",
+    "text_sha256": "c65db65c6576c3bab357b1bd2fdee8c10b4603d2e3dbb4134a4746697d0e069c",
+    "edits": [
+      "推导里报出的货币供给结果 3636.36 改成 4000",
+      "答案表里的货币供给 \\$3,636.36 改成 \\$4,000.00"
+    ],
+    "diff_file": "diffs/E1.diff",
+    "expect": {
+      "knowledge_found": true,
+      "zeroed": true
+    },
+    "expect_text": "触发知识错误，卡点分和步骤分清零"
+  },
+  {
+    "id": "E2",
+    "group": "E",
+    "item_id": "ECON-004-零基础",
+    "source_call_id": 19,
+    "source_sha256": "bd8853577398bbab939109ab0f326cc00383fc890ffe1fa0f991d9fe231d6155",
+    "text_file": "E2.md",
+    "text_sha256": "a49baf872960815598e59a0092c6203552b31f79abaebb7457da63538fac4ab6",
+    "edits": [
+      "删掉算出准备金 181.82 的公式块和结论句",
+      "删掉答案表里的准备金一行",
+      "删掉检查里报出 181.82 的那句"
+    ],
+    "diff_file": "diffs/E2.diff",
+    "expect": {
+      "knowledge_found": false,
+      "incomplete": true,
+      "missing_contains": "准备金",
+      "zeroed": false
+    },
+    "expect_text": "不触发知识错误；incomplete.found 为 true、missing 提到准备金；卡点分、步骤分照常计、不清零"
+  }
+]
