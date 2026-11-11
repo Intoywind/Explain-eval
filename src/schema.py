@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 COURSES = {"COMP2711", "IEDA1280", "ECON1221"}
-SUBTYPES = {"术语未先定义", "切换处漏连接", "公式未接含义", "前提未交代"}
+SUBTYPES = {"术语未先定义", "切换处漏连接", "公式未接含义", "前提未交代",
+            "长请求"}   # 长请求：几条短条目拼成的一条（drafts/build_items_long.py），不是一种跳步类型
 DIFFICULTIES = {"低", "中", "高"}
 SPLITS = {"dev", "holdout"}
 SOURCE_LEVELS = {"原话", "报告定位", "推测"}
@@ -29,9 +30,10 @@ STEP_FIELDS = ["id", "text"]
 # 只用于判分和分析、绝对不能发给被测模型的字段
 SCORING_FIELDS = ["knowledge_errors", "gate_questions", "recommended_steps", "source", "subtype", "difficulty"]
 
-# source 必须是 new 或以 real: 开头（错误）；real: 后面不是 <报告名>#<条目号> 的只给提醒（items.jsonl 里有 real:报告名C08 这种写法）
-SOURCE_RE = re.compile(r"^(new|real:.+)$")
-SOURCE_STRICT_RE = re.compile(r"^(new|real:[^#\s][^#]*#.+)$")
+# source 必须是 new、以 real: 开头，或 merged:<条目 id>,<条目 id>,…（长请求，由这些短条目拼成）（错误）；
+# real: 后面不是 <报告名>#<条目号> 的只给提醒（items.jsonl 里有 real:报告名C08 这种写法）
+SOURCE_RE = re.compile(r"^(new|real:.+|merged:[^,\s]+(,[^,\s]+)*)$")
+SOURCE_STRICT_RE = re.compile(r"^(new|real:[^#\s][^#]*#.+|merged:[^,\s]+(,[^,\s]+)*)$")
 
 
 def expected_split(path: str | Path) -> str:
@@ -129,7 +131,7 @@ def validate_item(obj, split: str) -> list[str]:
             errs.append(f"{f} 非法：{obj[f]!r}，应为 {'/'.join(sorted(allowed))}")
 
     if _nonempty_str(obj.get("source")) and not SOURCE_RE.match(obj["source"]):
-        errs.append(f"source 格式不对：{obj['source']!r}，应为 new 或以 real: 开头")
+        errs.append(f"source 格式不对：{obj['source']!r}，应为 new、以 real: 开头或 merged:<条目 id>,…")
 
     if "split" in obj and obj["split"] in SPLITS and obj["split"] != split:
         errs.append(f"split 为 {obj['split']!r}，与所在文件不一致（该文件应为 {split!r}）")
