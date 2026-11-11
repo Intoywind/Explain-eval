@@ -75,7 +75,7 @@ explain-eval/
 - 也支持 `--skill original`：这时每条条目按 course 自动选 `skills/original/` 里对应的那份。
 - 读 `data/holdout.jsonl` 必须显式加 `--holdout`，否则拒绝并报错。
 - 每次调用存进 SQLite 一行：run_id、item_id、skill 文件名、skill 内容的哈希、模型名、第几次重复、完整请求（系统提示词和用户消息）、完整回答、输入和输出的用量、耗时、时间戳、错误信息（如果有）。
-- 断点续跑：同一个（item_id、skill 哈希、模型、第几次重复）已经有成功记录的，跳过。
+- 断点续跑：同一个（item_id、模型、第几次重复、实际发出的请求哈希）已经有成功记录的，才跳过。请求哈希 = sha256(system prompt + user message + 调用参数的规范化 JSON)，所以 Skill、材料、请求、读者设定或生成参数任何一处变了，都会重跑，旧回答保留在库里但不再被当作这一版的结果。判分清单（knowledge_errors、gate_questions、recommended_steps）不进请求，改它们不触发重跑。
 - 调用失败时等一会儿重试，最多 3 次；仍失败就记下错误，继续下一条，不要整体中断。
 - `--dry-run`：只组装请求，打印第一条的完整内容，不调用 API。
 - 运行结束打印：成功几条、失败几条、跳过几条、总用量。
