@@ -2,6 +2,7 @@
 
 python -m src.run --skill skills/general_v1.md --model <config 里的模型名> --items data/items.jsonl --repeats 1
 python -m src.run --skill original ...        # 每条按 course 自动选 skills/original/ 里对应的文件
+python -m src.run --skill original_eval ...   # 同上，从 skills/original_eval/ 里选
 python -m src.run ... --dry-run               # 只组装请求，打印第一条完整内容，不调用 API
 python -m src.run --items data/holdout.jsonl --holdout ...   # 读保留集必须显式加 --holdout
 """
@@ -22,7 +23,8 @@ from . import db, providers
 from .schema import expected_split, validate_file
 
 ROOT = Path(__file__).resolve().parent.parent
-ORIGINAL_DIR = ROOT / "skills" / "original"
+# --skill 取这些值时，按条目的 course 在 skills/<值>/ 里选文件名以 <课程号小写>_ 开头的那份
+PER_COURSE_SKILL_DIRS = ("original", "original_eval")
 
 # 只有这三个字段会进入发给被测模型的请求
 REQUEST_FIELDS = ("reader_known", "material", "request")
@@ -48,6 +50,8 @@ class Prepared:
     skill: Skill
     system: str
     user: str
+    params: dict = None          # 实际发出的参数
+    request_sha256: str = ""     # db.request_hash(system, user, params)
 
 
 # ---------------- 组装 ----------------
@@ -68,11 +72,12 @@ def load_skill(path: Path, cache: dict) -> Skill:
     return cache[path]
 
 
-def original_skill_for(course: str) -> Path:
-    """在 skills/original/ 里找文件名以 <课程号小写>_ 开头的那份。"""
-    hits = sorted(ORIGINAL_DIR.glob(f"{course.lower()}_*.md"))
+def per_course_skill_for(dirname: str, course: str) -> Path:
+    """在 skills/<dirname>/ 里找文件名以 <课程号小写>_ 开头的那份（删改清单.md 之类不会匹配）。"""
+    d = ROOT / "skills" / dirname
+    hits = sorted(d.glob(f"{course.lower()}_*.md"))
     if len(hits) != 1:
-        raise UsageError(f"skills/original/ 里课程 {course} 对应的文件应恰好 1 份，实际 {len(hits)} 份：{[h.name for h in hits]}")
+        raise UsageError(f"skills/{dirname}/ 里课程 {course} 对应的文件应恰好 1 份，实际 {len(hits)} 份：{[h.name for h in hits]}")
     return hits[0]
 
 
@@ -112,20 +117,22 @@ def check_no_leak(item: dict, user: str) -> None:
         raise UsageError(f"条目 {item['id']} 的判分内容出现在了请求里，已停止：{leaked[0][:60]!r}")
 
 
-def prepare(items: list[dict], skill_arg: str) -> list[Prepared]:
+def prepare(items: list[dict], skill_arg: str, params: dict | None = None) -> list[Prepared]:
+    params = params or {}
     cache: dict = {}
     fixed: Skill | None = None
-    if skill_arg != "original":
+    if skill_arg not in PER_COURSE_SKILL_DIRS:
         p = Path(skill_arg)
         if not p.is_file():
             raise UsageError(f"Skill 文件不存在：{skill_arg}")
         fixed = load_skill(p, cache)
     out = []
     for it in items:
-        skill = fixed or load_skill(original_skill_for(it["course"]), cache)
+        skill = fixed or load_skill(per_course_skill_for(skill_arg, it["course"]), cache)
         user = build_user_message(it)
         check_no_leak(it, user)
-        out.append(Prepared(item=it, skill=skill, system=skill.text, user=user))
+        out.append(Prepared(item=it, skill=skill, system=skill.text, user=user, params=params,
+                            request_sha256=db.request_hash(skill.text, user, params)))
     return out
 
 
@@ -170,7 +177,8 @@ def _now() -> str:
 
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="python -m src.run", description="批量运行讲解评测")
-    ap.add_argument("--skill", required=True, help="Skill 文件路径，或 original（按 course 选 skills/original/ 里的文件）")
+    ap.add_argument("--skill", required=True,
+                    help="Skill 文件路径，或 original / original_eval（按 course 选 skills/<该名字>/ 里的文件）")
     ap.add_argument("--model", required=True, help="config.yaml 里 models[].name")
     ap.add_argument("--items", required=True, help="条目文件 .jsonl")
     ap.add_argument("--repeats", type=int, default=1, help="每条重复几次，默认 1")
@@ -180,7 +188,7 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
-def print_dry_run(preps: list[Prepared], model_cfg: dict, cfg: dict) -> None:
+def print_dry_run(preps: list[Prepared], model_cfg: dict, cfg: dict, repeats: int, db_path: Path) -> None:
     first = preps[0]
     bar = "=" * 72
     print(bar)
@@ -196,8 +204,20 @@ def print_dry_run(preps: list[Prepared], model_cfg: dict, cfg: dict) -> None:
     print(bar)
     print(f"全部 {len(preps)} 条的 Skill 选择：")
     for p in preps:
-        print(f"  {p.item['id']:<24} {p.item['course']:<9} → {p.skill.rel}  ({p.skill.sha256[:12]})")
+        print(f"  {p.item['id']:<24} {p.item['course']:<9} → {p.skill.rel}  (skill {p.skill.sha256[:12]}, 请求 {p.request_sha256[:12]})")
     print(f"判分内容泄漏检查：{len(preps)} 条全部通过（用户消息里没有知识错误清单、卡点问题、推荐步骤的文本）")
+    conn = db.connect_readonly(db_path)
+    if conn is None:
+        print(f"续跑预览：{_rel(db_path)} 不存在或尚未升级，按全部需要调用计（{len(preps) * repeats} 次）")
+    else:
+        todo = [(p.item["id"], r) for p in preps for r in range(1, repeats + 1)
+                if not db.has_success(conn, p.item["id"], model_cfg["name"], r, p.request_sha256)]
+        conn.close()
+        print(f"续跑预览（--repeats {repeats}）：共 {len(preps) * repeats} 次，将跳过 {len(preps) * repeats - len(todo)} 次，需调用 {len(todo)} 次")
+        for iid, r in todo[:20]:
+            print(f"  需调用：{iid} 第{r}次")
+        if len(todo) > 20:
+            print(f"  ……另有 {len(todo) - 20} 次")
     print("dry-run：未调用 API，未写数据库。")
 
 
@@ -237,10 +257,13 @@ def _main(args, argv) -> int:
     # 3. 配置、模型、组装请求
     cfg = load_config(Path(args.config))
     model_cfg = find_model(cfg, args.model)
-    preps = prepare(items, args.skill)
+    preps = prepare(items, args.skill, providers.build_params(model_cfg, cfg))
+    db_path = Path((cfg.get("defaults") or {}).get("db_path") or "results/eval.db")
+    if not db_path.is_absolute():
+        db_path = ROOT / db_path
 
     if args.dry_run:
-        print_dry_run(preps, model_cfg, cfg)
+        print_dry_run(preps, model_cfg, cfg, args.repeats, db_path)
         return 0
 
     # 4. 真实运行
@@ -251,9 +274,6 @@ def _main(args, argv) -> int:
     except RuntimeError as e:
         raise UsageError(str(e))
 
-    db_path = Path((cfg.get("defaults") or {}).get("db_path") or "results/eval.db")
-    if not db_path.is_absolute():
-        db_path = ROOT / db_path
     conn = db.connect(db_path)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
     items_rel = _rel(items_path)
@@ -270,7 +290,7 @@ def _main(args, argv) -> int:
             for r in range(1, args.repeats + 1):
                 k += 1
                 head = f"[{k}/{total}] {p.item['id']} 第{r}次"
-                if db.has_success(conn, p.item["id"], p.skill.sha256, model_cfg["name"], r):
+                if db.has_success(conn, p.item["id"], model_cfg["name"], r, p.request_sha256):
                     n_skip += 1
                     print(f"{head} 跳过（已有成功记录）")
                     continue
@@ -283,6 +303,8 @@ def _main(args, argv) -> int:
                 db.insert_call(conn, {
                     "run_id": run_id, "item_id": p.item["id"], "items_file": items_rel,
                     "skill_file": p.skill.rel, "skill_sha256": p.skill.sha256,
+                    # 按实际发出的参数算，保证哈希对应真实请求
+                    "request_sha256": db.request_hash(p.system, p.user, out.params_sent),
                     "model_name": model_cfg["name"], "provider": model_cfg["provider"],
                     "model_id": model_cfg["model_id"], "model_version": out.model_version,
                     "repeat_idx": r, "system_prompt": p.system, "user_message": p.user,

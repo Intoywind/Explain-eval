@@ -10,6 +10,7 @@
 skills/            被测的 Skill 文件（不改）
   general_v1.md
   original/        三门课各自的原版 Skill，--skill original 时按 course 选
+  original_eval/   原版 Skill 的测试副本（删去环境指令），--skill original_eval 时按 course 选
 data/
   items.jsonl      开发集，30 条（不改）
   holdout.jsonl    保留集，默认不读，必须显式加 --holdout
@@ -63,6 +64,7 @@ python -m src.run --skill skills/general_v1.md --model gpt-6.1-sol --items data/
 ```bash
 python -m src.run --skill skills/general_v1.md --model gpt-6.1-sol --items data/items.jsonl --repeats 1
 python -m src.run --skill original --model gpt-6.1-sol --items data/items.jsonl --repeats 1
+python -m src.run --skill original_eval --model gpt-6.1-sol --items data/items.jsonl --repeats 1
 ```
 
 读保留集必须加 `--holdout`：
@@ -99,7 +101,7 @@ python -m src.run --skill original --model gpt-6.1-sol --items data/holdout.json
 
 规则：
 
-- **断点续跑**：同一个（item_id、Skill 哈希、模型名、第几次重复）已有 `status='ok'` 的记录，就跳过。
+- **断点续跑**：同一个（item_id、模型名、第几次重复、请求哈希）已有 `status='ok'` 的记录才跳过。请求哈希 `request_sha256` = sha256(system prompt + `\x00` + user message + `\x00` + 实际发出参数的规范化 JSON)，规范化 JSON 指键排序、无多余空白、不转义中文。Skill、材料、请求、读者设定、生成参数任何一处变了都会重跑；判分清单不进请求，改它们不触发重跑。旧库打开时会自动加这一列，并用存着的 system_prompt、user_message、params_used.sent 补算。`--dry-run` 会预览将跳过和需调用的次数。
 - **失败**：网络错误、超时、429、5xx 会等待后重试（429 遵守 Retry-After）；其他 4xx 直接记为失败。仍失败就记下错误，继续下一条。
 - **截断**：回答因长度上限被截断（finish_reason=length）记为失败，不算成功记录，下次运行会重新调用。
 
