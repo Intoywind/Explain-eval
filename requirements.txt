@@ -3,3 +3,5 @@ openai==3.49.0
 httpx==0.28.1
 python-dotenv==1.2.4
 certifi==2026.10.23
+Markdown==3.11.3
+latex2mathml==3.81.1

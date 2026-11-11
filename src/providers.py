@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -68,20 +69,23 @@ def require_key(provider_name: str, config: dict) -> str:
 
 # ---------------- 限速 ----------------
 
-_last_call_at: dict[str, float] = {}
+_next_slot: dict[str, float] = {}
+_throttle_lock = threading.Lock()
 
 
 def _throttle(provider_name: str, pcfg: dict) -> None:
+    """同一接口两次请求之间至少间隔 60/rpm 秒。多线程并发调用时也成立：每个线程先预订一个时间槽再等。"""
     rpm = pcfg.get("rate_limit_per_minute")
     if not rpm:
         return
     gap = 60.0 / float(rpm)
-    last = _last_call_at.get(provider_name)
-    if last is not None:
-        wait = gap - (time.monotonic() - last)
-        if wait > 0:
-            time.sleep(wait)
-    _last_call_at[provider_name] = time.monotonic()
+    with _throttle_lock:
+        now = time.monotonic()
+        slot = max(now, _next_slot.get(provider_name, now))
+        _next_slot[provider_name] = slot + gap
+    wait = slot - time.monotonic()
+    if wait > 0:
+        time.sleep(wait)
 
 
 # ---------------- 参数 ----------------
@@ -157,7 +161,7 @@ def _call_openai(model_cfg: dict, pcfg: dict, key: str, system: str, user: str, 
 
     timeout = pcfg.get("timeout_seconds", 600)
     ck = (key, timeout)
-    if ck not in _openai_clients:
+    if ck not in _openai_clients:  # 多线程下偶尔会建两个客户端，无害
         # SDK 自带的重试关掉，统一走本模块的重试逻辑，便于计数和记录
         _openai_clients[ck] = openai.OpenAI(api_key=key, timeout=timeout, max_retries=0)
     client = _openai_clients[ck]

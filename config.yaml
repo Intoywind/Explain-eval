@@ -62,3 +62,19 @@ models:
   #   provider: hkust
   #   model_id: xxx
   #   params: {}
+
+# ---- 裁判 ----
+# 字段同 models 里的一项。python -m src.judge 用这个模型给讲解逐项判断。
+judge:
+  name: gpt-6.1-terra
+  provider: openai
+  model_id: gpt-6.1-terra
+  # 2026-11-11 实测：默认推理强度（medium）下 temperature 不支持（0 和 0.2 都报 400），只有 reasoning.effort=none 时才接受
+  # temperature=0；seed 不支持。按“不支持温度 0 就用默认值”的约定：不发 temperature，推理强度和 verbosity 固定为默认值 medium。
+  # 接口回报的实际参数（temperature 1.0、top_p 0.98 等）照常存进 judgments.params_used。
+  params:
+    reasoning: {effort: medium}
+    text: {verbosity: medium}
+  price_per_1m_tokens:   # 第三方汇总的标准价（2026-11 查询，OpenAI 价格页未直接确认）；缓存输入 $0.05，未计入
+    input: 1.0
+    output: 5.0

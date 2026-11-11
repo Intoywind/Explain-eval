@@ -2,7 +2,7 @@
 
 测大模型给指定读者讲解课程知识时有没有跳步：术语没先定义、换记号时漏了连接、公式没接上含义、前提没交代。
 
-本轮只有项目骨架和批量运行，**还没有自动评分**。
+两轮内容：批量运行被测模型（第一轮）；裁判自动评分、人工盲打、人和裁判对比、两份 Skill 的比较报告（第二轮）。
 
 ## 目录
 
@@ -16,13 +16,23 @@ data/
   holdout.jsonl    保留集，默认不读，必须显式加 --holdout
   examples.jsonl   items.jsonl 的前 2 条，用于试跑
 drafts/            条目生成脚本和旧版存档（程序不读）
+prompts/
+  judge_v1.md      裁判 prompt（分 SYSTEM / USER 两段，{{双花括号}} 是占位符）；改动就新建 judge_v2.md
 src/
   schema.py        条目字段定义和校验
   providers.py     统一调用 HKUST GenAI API / OpenAI API（限速、重试、密钥脱敏）
   db.py            SQLite 读写
   run.py           批量运行入口
-config.yaml        接口、默认参数、模型列表
+  scoring.py       裁判输出的解析、引句校验、三档记分（纯函数）
+  judge.py         裁判入口
+  rules.py         规则检查（篇幅、没学过的词）
+  blind.py         人工盲打网页导出、人和裁判对比
+  report.py        两份 Skill 的比较报告
+tests/             单元测试
+config.yaml        接口、默认参数、模型列表、裁判
 results/eval.db    运行结果（不入库）
+blind/             盲打网页和对应表（不入库）
+reports/           比较报告
 notes/             AI 编程记录
 ```
 
@@ -109,4 +119,76 @@ python -m src.run --skill original --model gpt-6.1-sol --items data/holdout.json
 
 ```bash
 sqlite3 -header -column results/eval.db "select item_id, model_version, status, finish_reason, input_tokens, output_tokens from calls"
+```
+
+## 裁判（第二轮）
+
+```bash
+python -m src.judge --prompt prompts/judge_v1.md --dry-run      # 打印第一条完整的裁判请求
+python -m src.judge --prompt prompts/judge_v1.md                # 评所有还没评过的当前回答
+python -m src.judge --prompt prompts/judge_v1.md --skill skills/general_v1.md --model gpt-6.1-sol --limit 5
+python -m src.judge --prompt prompts/judge_v1.md --call-ids 16,31
+python -m src.judge --known --prompt prompts/judge_v1.md        # 已知样本检查（data/known_cases.jsonl，不存在就跳过）
+```
+
+- 裁判模型在 `config.yaml` 的 `judge:` 下配置。gpt-6.1-terra 在默认推理强度下不接受 temperature，所以不发；接口回报的实际参数存进 `judgments.params_used`。
+- 裁判只拿到：读者学过/没学过、材料、请求、知识错误清单、卡点问题（id、text、accept）、推荐步骤（id、text）、讲解全文。拿不到 Skill、被测模型、重复次数、条目 source/subtype/difficulty、卡点问题出处；组装后会检查。
+- **当前回答**：同一个（条目、被测模型、Skill 文件、第几次重复）有多条成功记录时取最新一条（视图 `current_calls`）。裁判、盲打、报告都只用当前回答。
+- **断点续跑**：同一份回答、同一个裁判模型、同一个裁判请求哈希（prompt、判分清单、参数、讲解任何一处变了都会变）已有成功记录就跳过。所以改了卡点问题或推荐步骤，旧回答会被重新评，旧记录保留。
+- **格式重试**：裁判输出不是合法 JSON、缺字段、类型不对、gaps 的 subtype/severity 不在允许值里、或 gate/steps 的 id 和条目对不上，最多再判 2 次；仍失败记 `error` 继续。和证据不合格的重判共用这 2 次。网络类错误另按 `defaults.retry` 重试。
+- `--workers`（默认 4）并发调用，限速仍按 config。
+
+### 记分（代码算，裁判不直接给分）
+
+| 档 | 字段 | 记法 |
+|---|---|---|
+| 知识 | `knowledge_errors` | 触发任一项 = 知识不通过 |
+| 卡点分 | `gate_questions` | 答上数 / 问题数（存分子、分母） |
+| 步骤分 | `recommended_steps` | 踩中数 / 步骤数（存分子、分母） |
+
+- 知识不通过时卡点分、步骤分的分子记 0，分母不变；逐项原始判断照常入库。
+- 引句校验：每条引句去掉首尾空白、连续空白压成一个后，必须是讲解原文（同样规范化）的子串。
+- **没有有效证据不能清零，也不能改判**。下面几种情况算“证据不合格”，让裁判重判同一份回答，最多 2 次：
+  - `knowledge_error.found` 为 true，但 `which` 为空、或有一条对不上条目的 `knowledge_errors`（去首尾空白后相同才算对上）、或 `quotes` 里没有一条通过校验；
+  - 某个卡点 `answered` 为 true、或某个步骤 `done` 为 true，但没有一条引句通过校验。
+- 重判后仍不合格的，整份标 `needs_review`（待复核）：存原始输出、解析结果和不合格原因，不算三档分、不写逐项表、不进任何统计；报告单独列出份数和清单。续跑时 `needs_review` 也算评过，不自动再判。
+- 引句理由：引句核对不上是裁判抄错了原文，不能把这个错算到被测回答头上。
+- “没答全”（`incomplete`）单独记，不影响记分。“卡点全答上” = 知识通过且卡点分 = 1，只用于辅助统计。
+
+### 表
+
+- `judgments`：每次裁判一行：原始输出、解析结果（含每条引句的校验结果）、校验标记、裁判模型和版本、prompt 哈希、判分清单哈希、请求哈希、用量、三档结果。
+- `judge_gate` / `judge_steps`：逐问题、逐步骤（只有 `status='ok'` 的裁判结果才有；能计分的结果里 `answered`/`done` 与 `*_raw` 相同）。
+- `judge_extra_steps` / `judge_gaps` / `judge_redundancy`：清单外步骤、跳步、冗余，每条带 `quote_valid`。
+- `rule_checks`：每份回答的字符数、用到了哪些“没学过”的词和第一次出现的位置（只做字符串匹配，仅供参考）。`python -m src.rules` 单独刷新，裁判运行时也会自动刷新。
+- `known_judgments`：已知样本检查的记录，不进入任何统计。
+
+## 人工盲打
+
+```bash
+python -m src.blind export --n 50 --seed 1 --out blind/round1/
+python -m src.blind compare blind/round1/key.json ~/Downloads/blind_round1_xxx.json
+```
+
+- `index.html` 是单文件网页，不依赖网络，直接双击打开即可。Markdown 和公式已预先转好（公式用浏览器原生的 MathML 显示，转不了的原样显示 TeX）。
+- 页面不显示 Skill、被测模型、条目 id、裁判结果、卡点问题出处；对应关系只在 `key.json` 里，打分完再用。
+- 先填“看懂了没有”，填完才显示卡点问题；推荐步骤默认折叠、选填。进度自动存在浏览器本地；“导出结果”下载 JSON。
+- 抽样：轮流按（Skill 组 × 被测模型）取，每次挑这个条件下被抽次数最少的条目，尽量让每个条目、每份 Skill 都抽到。
+- `compare` 输出 Markdown（默认写到 key.json 旁边的 `compare.md`）：逐问题一致率和 Cohen's kappa、每份回答的卡点分对比（裁判判知识不通过的单列）、逐步骤一致率和 kappa、全部分歧清单、总体判断 × 卡点分交叉表、分歧偏向。
+
+## 两份 Skill 的比较报告
+
+```bash
+python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-sol --judge-prompt prompts/judge_v1.md --out reports/
+```
+
+- 只比较两边都有裁判结果、且重复次数相同的条目；其余列出来，不计入。
+- 先在条目内对几次重复取平均（知识不通过的那次按 0），再在条目间取平均。
+- 每个数字后面的 [Qn] 指向文末附录的 SQL，可以直接在 `sqlite3 results/eval.db` 里运行。报告运行时会把当前条目元数据写进 `items_snapshot`、`items_gate`、`items_steps` 三张表供 SQL 关联。
+- 只报数字，不做显著性检验，不下结论。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -t . -v
 ```
