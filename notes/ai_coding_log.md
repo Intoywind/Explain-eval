@@ -60,3 +60,36 @@
 ### 待定
 
 - 30 条的正式运行还没跑，等我确认费用后再跑。
+
+## 2026-11-12 第六份输入：通用 V2 在 30 条短题上试跑（Claude Code，claude-opus-5-5）
+
+### 我让 AI 做什么
+
+按《给ClaudeCode的第六份输入.md》：核对 `skills/general_v2.md` 的 md5 后提交；general_v2 × gpt-6.1-sol / gpt-6-luna 各跑 30 条 × 3 次；用 judge_v2 判分，抽 20 份判第二遍；写 V1 对 V2 的单独报告和给人读的样例。不改 V2、条目、prompt；四组汇总的数字不能变；拼接长请求的数据不用；测试集草稿不读、不提交。
+
+### 实际新建、修改的文件
+
+- 提交：`skills/general_v2.md`（md5 32ab9d6e…，核对一致）、`给ClaudeCode的第六份输入.md`
+- 新建：`src/v2report.py`、`reports/short_v1_vs_v2__judge_v2.md`、`reports/short_v1_vs_v2_samples.md`
+- 修改：
+  - `src/judge.py`：泄漏检查也查各份通用 Skill 的文件名和 YAML 头的 name、version（原来只查 general_v1）；`--repeat` 认 `--skill`、`--model` 筛选，新增 `--strata model`。
+  - `src/summary.py`：所有查询只算 general_v1、original_eval 的回答，V2 的记录不进四组汇总。
+  - `tests/test_sample.py`：按模型分层、泄漏词两个测试。
+  - `README.md`、本文件。
+- 没改：`skills/`、`data/`、`prompts/`、`drafts/`、`reports/summary__judge_v2.md`、`reports/long_dev__judge_v2.md`。
+
+### 用哪几条命令验证、结果如何
+
+| 检查 | 结果 |
+|---|---|
+| md5：general_v2.md、items.jsonl | 都和第六份输入一致 |
+| V2 将发出的用户消息、参数和 V1 两组库里存的逐条比对 | 180 条用户消息相同；参数相同（都没设输出上限） |
+| 生成（`--workers 6 --stream`） | 180/180 成功，没有截断、没有限速错误 |
+| 判分（`--workers 8 --stream`）、第二遍 20 份（种子 20261112，每个模型 10 份） | 第一遍 180 ok、0 待复核、0 重判；第二遍 20 ok；泄漏检查通过 |
+| 四组汇总：从改动前的数据库备份生成一份，和现在的数据库生成的一份对比 | 正文逐字相同；只有生成时间和附录 SQL（加了只算四组的条件）不同 |
+| 报告里 V1 的数字和四组汇总对比 | 知识通过率、卡点分、步骤分、卡点全答上一致 |
+| V1 没每次答上的卡点数 | sol 7、luna 12，和第六份输入数的一致 |
+| `python -m unittest discover -s tests -t .` | 41 个测试通过 |
+| 花费 | 按标价 $4.81（生成 $2.68，判分 $2.13），没超过 8 美元 |
+
+数据库改动前的备份：`results/eval.before-v2short.db`（不入库）。

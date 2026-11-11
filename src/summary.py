@@ -33,6 +33,8 @@ SHORT = {"general_v1 × gpt-6.1-sol": "通用·sol", "original_eval × gpt-6.1-s
 SKILLS = ["general_v1", "original_eval"]
 MODELS = ["gpt-6.1-sol", "gpt-6-luna"]
 EPS = 1e-9
+# 只算这四组的回答（之后加的 Skill，例如 general_v2，有单独的报告，不进这里的任何数字）
+FOUR_GROUPS_SQL = "(c.skill_file = 'skills/general_v1.md' OR c.skill_file LIKE 'skills/original_eval/%')"
 
 # COMP original_eval 关键词：向用户要文件路径 / 写了“待原题补齐”“非历年真题”
 ASK_PATH_RE = r"(文件|PDF|pdf|本地)?路径|上传|请(你)?(提供|发送|发来|给出|贴出)[^。\n]{0,12}(文件|PDF|pdf|原题|题目|试卷)"
@@ -57,6 +59,7 @@ def group_sql(judge_name: str, prompt_sha: str) -> str:
        SELECT max(x.id) FROM judgments x
        WHERE x.call_id = c.id AND x.judge_model_name = {_q(judge_name)}
          AND x.prompt_sha256 = {_q(prompt_sha)} AND x.rubric_sha256 = s.rubric_sha256)
+  WHERE {FOUR_GROUPS_SQL}
 )"""
 
 
@@ -332,7 +335,7 @@ LEFT JOIN judgments n ON n.id = (
 LEFT JOIN judgments o ON o.id = (
      SELECT max(x.id) FROM judgments x WHERE x.call_id = c.id AND x.status = 'ok'
        AND x.judge_model_name = {_q(judge_name)} AND x.prompt_sha256 = {_q(prompt_sha)} AND x.rubric_sha256 != s.rubric_sha256)
-WHERE c.item_id LIKE {_q(like)}
+WHERE c.item_id LIKE {_q(like)} AND {FOUR_GROUPS_SQL}
 ORDER BY c.item_id, grp, c.repeat_idx""")
     title = like.rstrip("-%")
     both = [r for r in rows if r["old_id"] and r["new_id"]]
@@ -364,7 +367,8 @@ SELECT r.id AS repeat_id, r.judge_run_id, r.sample_seed, r.call_id, r.item_id, r
        j.parsed_json AS p1, r.parsed_json AS p2
 FROM repeat_judgments r JOIN judgments j ON j.id = r.first_judgment_id
 JOIN items_snapshot s ON s.item_id = r.item_id   -- 只算当前条目文件里的条目（长请求等另一套条目不算）
-WHERE r.judge_model_name = {_q(judge_name)} AND r.prompt_sha256 = {_q(prompt_sha)}
+JOIN calls c ON c.id = r.call_id
+WHERE {FOUR_GROUPS_SQL} AND r.judge_model_name = {_q(judge_name)} AND r.prompt_sha256 = {_q(prompt_sha)}
 ORDER BY r.call_id""")
     L = [f"## 9. 裁判稳定性：抽 30 份判第二遍 [{t}]", ""]
     if not rows:
@@ -496,12 +500,13 @@ SELECT jr.judge_run_id, coalesce(jr.purpose, 'main') AS purpose, jr.started_at, 
        sum(CASE WHEN x.attempts = 1 THEN 0 ELSE 1 END) AS n_multi,
        sum(coalesce(json_extract(x.usage_raw, '$.input_tokens_details.cached_tokens'), 0)) AS cached_last
 FROM judge_runs jr
-JOIN (SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
+JOIN (SELECT id, judge_run_id, call_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
       UNION ALL
-      SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
+      SELECT id, judge_run_id, call_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
   ON x.judge_run_id = jr.judge_run_id
 JOIN items_snapshot s ON s.item_id = x.item_id   -- 只算当前条目文件里的条目
-WHERE jr.prompt_sha256 = {_q(prompt_sha)}
+JOIN calls c ON c.id = x.call_id
+WHERE jr.prompt_sha256 = {_q(prompt_sha)} AND {FOUR_GROUPS_SQL}
 GROUP BY jr.judge_run_id ORDER BY jr.started_at""")
     L = [f"## 11. 实际花费 [{t}]", "",
          f"单价（每百万 tokens）：输入 ${pin}，缓存输入 ${pcache}，输出 ${pout}。"

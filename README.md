@@ -9,6 +9,7 @@
 ```
 skills/            被测的 Skill 文件（不改）
   general_v1.md
+  general_v2.md    通用 Skill v2（第五稿）
   original/        三门课各自的原版 Skill，--skill original 时按 course 选
   original_eval/   原版 Skill 的测试副本（删去环境指令），--skill original_eval 时按 course 选
 data/
@@ -31,6 +32,7 @@ src/
   report.py        两份 Skill 的比较报告
   summary.py       四组正式评分的汇总（含裁判稳定性、COMP 关键词、花费）
   longreport.py    长请求验证报告（单独讲 vs 连着讲）
+  v2report.py      通用 V1 对 V2 在 30 条短题上的对比报告
 tests/             单元测试
   judge_fixtures/  裁判验收样例（make_fixtures.py 从真实回答生成）
 config.yaml        接口、默认参数、模型列表、裁判
@@ -225,6 +227,22 @@ python -m src.longreport --out reports/
 - `--max-output-tokens`、`--timeout` 只覆盖这一次运行，不改 config；`max_output_tokens` 进实际发送的参数、存进库，也进请求哈希。
 - 长请求条目 id 与短条目不同，`current_calls` 里互不覆盖；四组汇总、两份 Skill 比较、盲标只认 `data/items.jsonl` 里的条目（`items_snapshot`），长请求数据不进这些报告。
 - 报告 `reports/long_dev__judge_v2.md`：逐卡点（不套知识清零）短 vs 长、按部分/课程/读者分解、步骤、卡点全答上占比（含 5 份短回答按重复序号合一份）、篇幅（按“第 i 部分”标题切开）、知识错误与没答全、待复核、第二遍一致率、花费。
+
+## 通用 V1 对 V2（30 条短题）
+
+```bash
+python -m src.run --skill skills/general_v2.md --model gpt-6.1-sol --items data/items.jsonl --repeats 3 --workers 6 --stream
+python -m src.run --skill skills/general_v2.md --model gpt-6-luna --items data/items.jsonl --repeats 3 --workers 6 --stream
+python -m src.judge --prompt prompts/judge_v2.md --skill skills/general_v2.md --workers 8 --stream
+python -m src.judge --repeat 20 --seed 20261112 --strata model --skill skills/general_v2.md --prompt prompts/judge_v2.md --workers 8 --stream
+python -m src.v2report --out reports/
+```
+
+- `--repeat` 现在也认 `--skill`、`--model`：先筛出可抽的回答再分层；`--strata model` 按被测模型分层。不给这两个参数时和以前一样。
+- 裁判的泄漏检查也查 `skills/` 下各份通用 Skill 的文件名和 YAML 头里的 name、version（如 general_v2、general-explain-v2、2.0-draft5）。
+- 四组汇总（`src.summary`）只算 general_v1 和 original_eval 的回答，V2 的生成、判分、第二遍、花费都不进它。
+- 报告 `reports/short_v1_vs_v2__judge_v2.md`：汇总（按课程、读者版本）、逐卡点、重点卡点、变差的卡点、步骤（逐条在附录）、篇幅和冗余、编程入门内容检查、知识错误、跳步、步骤分与卡点分对照、样例挑选依据、待复核、第二遍一致率、花费。
+- 样例 `reports/short_v1_vs_v2_samples.md`：6 组同一条目、同一模型、同一重复序号的 V1/V2 回答原文，不附裁判结论。
 
 ## 测试
 

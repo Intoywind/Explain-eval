@@ -32,6 +32,20 @@ class StratifiedSampleTests(unittest.TestCase):
         with self.assertRaises(UsageError):
             stratified_sample(pool({"A": 1, "B": 5}), 4, 0)
 
+    def test_model_strata(self):
+        p = [{"call_id": i, "model": "sol" if i <= 90 else "luna"} for i in range(1, 181)]
+        r = stratified_sample(p, 20, 20261112, "model")
+        self.assertEqual(sum(x["model"] == "sol" for x in r), 10)
+        self.assertEqual(sum(x["model"] == "luna" for x in r), 10)
+
+
+class LeakMarkerTests(unittest.TestCase):
+    def test_general_skill_names_and_versions_forbidden(self):
+        from src.judge import _top_skill_markers
+        m = _top_skill_markers()
+        for t in ("general_v1", "general_v2", "general-explain-v2", "2.0-draft5"):
+            self.assertIn(t, m)
+
 
 if __name__ == "__main__":
     unittest.main()

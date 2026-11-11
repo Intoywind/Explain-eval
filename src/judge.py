@@ -114,9 +114,23 @@ def forbidden_texts(item: dict, cfg: dict) -> list[str]:
     for m in cfg.get("models") or []:
         out += [m.get("name", ""), m.get("model_id", "")]
     out += ["general_v1", *(f"skills/{d}" for d in PER_COURSE_SKILL_DIRS)]
+    out += _top_skill_markers()
     for d in PER_COURSE_SKILL_DIRS:
         out += [p.stem for p in (ROOT / "skills" / d).glob("*.md")]
     return [t for t in out if isinstance(t, str) and len(t.strip()) >= 4]
+
+
+def _top_skill_markers() -> list[str]:
+    """skills/ 下各份通用 Skill 的文件名（如 general_v2）和 YAML 头里的 name、version（如 general-explain-v2、2.0-draft5）。"""
+    out = []
+    for p in sorted((ROOT / "skills").glob("*.md")):
+        out.append(p.stem)
+        head = p.read_text(encoding="utf-8").split("\n---", 1)[0] if p.read_text(encoding="utf-8").startswith("---") else ""
+        for key in ("name", "version"):
+            m = re.search(rf"^{key}:\s*\"?([^\"\n]+?)\"?\s*$", head, re.M)
+            if m:
+                out.append(m.group(1))
+    return out
 
 
 def check_no_leak(item: dict, cfg: dict, user: str, response_text: str) -> None:
@@ -302,8 +316,9 @@ def parse_args(argv):
     ap.add_argument("--repeat", type=int, metavar="N",
                     help="稳定性检查：从第一遍 ok 的当前回答里按课程分层随机抽 N 份，再判一遍，存 repeat_judgments，不进统计")
     ap.add_argument("--seed", type=int, default=20261111, help="--repeat 抽样的随机种子，默认 20261111")
-    ap.add_argument("--strata", choices=["course", "model_course"], default="course",
-                    help="--repeat 的分层：course = 按课程（默认）；model_course = 按（被测模型 × 课程）")
+    ap.add_argument("--strata", choices=["course", "model_course", "model"], default="course",
+                    help="--repeat 的分层：course = 按课程（默认）；model_course = 按（被测模型 × 课程）；model = 按被测模型。"
+                         "--skill、--model 会先筛选可抽的回答")
     ap.add_argument("--max-output-tokens", type=int, help="只对这次运行设置裁判的 max_output_tokens，不改 config；会存进 params_used")
     ap.add_argument("--timeout", type=float, help="只对这次运行放宽裁判请求超时（秒），不改 config")
     ap.add_argument("--stream", action="store_true", help="流式接收裁判输出（长输出用，见 src.run --stream）；不进请求哈希")
@@ -607,8 +622,16 @@ def stratified_sample(pool: list[dict], n: int, seed: int, key: str = "course") 
 def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> int:
     conn = db.connect(db_path)
     pool = []
+    where, wparams = ["1=1"], []
+    if args.skill:   # 只在这份 Skill 的回答里抽（不给时和以前一样，全部当前回答都可抽）
+        w, p_ = skill_filter_sql(args.skill)
+        where.append(w)
+        wparams += p_
+    if args.model:
+        where.append("model_name = ?")
+        wparams.append(args.model)
     for r in conn.execute("SELECT id, item_id, model_name, skill_file, repeat_idx, response_text FROM current_calls"
-                          " ORDER BY id").fetchall():
+                          f" WHERE {' AND '.join(where)} ORDER BY id", wparams).fetchall():
         item = items_by_id.get(r["item_id"])
         if item is None:
             continue
@@ -619,7 +642,7 @@ def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) ->
         if j is None or j["status"] != "ok":   # 第一遍待复核或没评过的不抽
             continue
         pool.append({"call_id": r["id"], "row": r, "item": item, "course": item["course"], "first_id": j["id"],
-                     "model_course": f"{r['model_name']}|{item['course']}"})
+                     "model_course": f"{r['model_name']}|{item['course']}", "model": r["model_name"]})
     sample = stratified_sample(pool, args.repeat, args.seed, args.strata)
     todo, n_skip = [], 0
     for s_ in sample:
