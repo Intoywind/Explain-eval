@@ -33,6 +33,8 @@ src/
   summary.py       四组正式评分的汇总（含裁判稳定性、COMP 关键词、花费）
   longreport.py    长请求验证报告（单独讲 vs 连着讲）
   v2report.py      通用 V1 对 V2 在 30 条短题上的对比报告
+  merged.py        合并评测集计分（merged_scores 表）
+  testreport.py    正式测试报告（三份 Skill × 两个模型）
 tests/             单元测试
   judge_fixtures/  裁判验收样例（make_fixtures.py 从真实回答生成）
 config.yaml        接口、默认参数、模型列表、裁判
@@ -243,6 +245,24 @@ python -m src.v2report --out reports/
 - 四组汇总（`src.summary`）只算 general_v1 和 original_eval 的回答，V2 的生成、判分、第二遍、花费都不进它。
 - 报告 `reports/short_v1_vs_v2__judge_v2.md`：汇总（按课程、读者版本）、逐卡点、重点卡点、变差的卡点、步骤（逐条在附录）、篇幅和冗余、编程入门内容检查、知识错误、跳步、步骤分与卡点分对照、样例挑选依据、待复核、第二遍一致率、花费。
 - 样例 `reports/short_v1_vs_v2_samples.md`：6 组同一条目、同一模型、同一重复序号的 V1/V2 回答原文，不附裁判结论。
+
+## 正式测试：三份 Skill × 合并评测集
+
+```bash
+# 长题生成（六组各一条，可同时跑）；短题沿用已有回答和判分
+python -m src.run --skill skills/general_v2.md --model gpt-6.1-sol --items data/items_merged.jsonl --tier 长题 --repeats 3 \
+    --max-output-tokens 32000 --timeout 1800 --stream --workers 16
+python -m src.judge --prompt prompts/judge_v2.md --items data/items_merged.jsonl --tier 长题 --skill skills/general_v2.md --model gpt-6.1-sol \
+    --max-output-tokens 32000 --timeout 1800 --stream --workers 8
+python -m src.judge --repeat 54 --seed 20261114 --strata skill_model --prompt prompts/judge_v2.md --items data/items_merged.jsonl --tier 长题 \
+    --max-output-tokens 32000 --timeout 1800 --stream --workers 27
+python -m src.merged && python -m src.testreport --out reports/
+```
+
+- `data/items_merged.jsonl`：60 条（短题 30 = items.jsonl 原样，长题 30）。多出的字段 `tier`、`kind`、`points`、`zero_rule`、`parts` 只用于计分；`src.schema` 按 tier 检查 split（短题 dev、长题 test）、分值合计、`parts` 的键。
+- `--tier 长题`（run 和 judge）：只跑 / 只评这一档的条目。
+- `src/merged.py`：每份回答一行写进 `merged_scores`（清零前后的卡点分、步骤分、满分、被清零的部分、生成失败记 0）。清零规则：短题、做题类整份清零；概念理解类按 `parts` 只清讲错的那一部分，`parts.steps` 为 null 的步骤不受影响。
+- `src/testreport.py`：`reports/test_three_skills__judge_v2.md`。主结果查询附在报告末尾；规则标签、过程 / 结果两个对应表只在报告里用于分组，不发给被测模型和裁判。
 
 ## 测试
 

@@ -13,9 +13,15 @@ from pathlib import Path
 
 COURSES = {"COMP2711", "IEDA1280", "ECON1221"}
 SUBTYPES = {"术语未先定义", "切换处漏连接", "公式未接含义", "前提未交代",
-            "长请求"}   # 长请求：几条短条目拼成的一条（drafts/build_items_long.py），不是一种跳步类型
+            "长请求",   # 长请求：几条短条目拼成的一条（drafts/build_items_long.py），不是一种跳步类型
+            "长题"}     # 长题：正式测试集里的长条目（drafts/build_items_long_test.py），不是一种跳步类型
 DIFFICULTIES = {"低", "中", "高"}
-SPLITS = {"dev", "holdout"}
+SPLITS = {"dev", "holdout", "test"}
+# 合并评测集（data/items_merged.jsonl）多出来的字段；只用于计分，可选，出现了就校验
+TIERS = {"短题": "dev", "长题": "test"}          # tier → 合并文件里该条应有的 split
+KINDS = {"短题", "做题类", "概念理解类"}
+ZERO_RULES = {"整份清零", "只清讲错的那一部分"}
+OPTIONAL_FIELDS = ["tier", "kind", "points", "zero_rule", "parts"]
 SOURCE_LEVELS = {"原话", "报告定位", "推测"}
 
 FIELDS = [
@@ -32,13 +38,59 @@ SCORING_FIELDS = ["knowledge_errors", "gate_questions", "recommended_steps", "so
 
 # source 必须是 new、以 real: 开头，或 merged:<条目 id>,<条目 id>,…（长请求，由这些短条目拼成）（错误）；
 # real: 后面不是 <报告名>#<条目号> 的只给提醒（items.jsonl 里有 real:报告名C08 这种写法）
-SOURCE_RE = re.compile(r"^(new|real:.+|merged:[^,\s]+(,[^,\s]+)*)$")
-SOURCE_STRICT_RE = re.compile(r"^(new|real:[^#\s][^#]*#.+|merged:[^,\s]+(,[^,\s]+)*)$")
+# notes:<讲义或笔记名> 是长题的出处写法
+SOURCE_RE = re.compile(r"^(new|real:.+|notes:.+|merged:[^,\s]+(,[^,\s]+)*)$")
+SOURCE_STRICT_RE = re.compile(r"^(new|real:[^#\s][^#]*#.+|notes:.+|merged:[^,\s]+(,[^,\s]+)*)$")
 
 
 def expected_split(path: str | Path) -> str:
-    """按文件名决定该文件里的条目应属哪个 split：文件名含 holdout 的为 holdout，其余为 dev。"""
-    return "holdout" if "holdout" in Path(path).name else "dev"
+    """按文件名决定该文件里的条目应属哪个 split：文件名含 holdout 的为 holdout；含 merged 的是合并评测集，
+    按每条的 tier 决定（返回 "mixed"）；含 _test 的为 test；其余为 dev。"""
+    name = Path(path).name
+    if "holdout" in name:
+        return "holdout"
+    if "merged" in name:
+        return "mixed"
+    if "_test" in name:
+        return "test"
+    return "dev"
+
+
+def _check_merged_extra(obj: dict, errs: list[str]) -> None:
+    tier, kind, pts, zr, parts = (obj.get(k) for k in OPTIONAL_FIELDS)
+    if "tier" in obj and tier not in TIERS:
+        errs.append(f"tier 非法：{tier!r}，应为 {'/'.join(TIERS)}")
+    if "kind" in obj and kind not in KINDS:
+        errs.append(f"kind 非法：{kind!r}，应为 {'/'.join(sorted(KINDS))}")
+    if "zero_rule" in obj and zr not in ZERO_RULES:
+        errs.append(f"zero_rule 非法：{zr!r}")
+    if "points" in obj:
+        need = ("gate_each", "gate_total", "step_each", "step_total")
+        if not isinstance(pts, dict) or any(not isinstance(pts.get(k), int) for k in need):
+            errs.append("points 应为 {gate_each, gate_total, step_each, step_total}，都是整数")
+        else:
+            nq, ns = len(obj.get("gate_questions") or []), len(obj.get("recommended_steps") or [])
+            if pts["gate_total"] != pts["gate_each"] * nq:
+                errs.append(f"points.gate_total {pts['gate_total']} ≠ gate_each × 卡点数 {pts['gate_each']}×{nq}")
+            if pts["step_total"] != pts["step_each"] * ns:
+                errs.append(f"points.step_total {pts['step_total']} ≠ step_each × 步骤数 {pts['step_each']}×{ns}")
+    if zr == "只清讲错的那一部分":
+        if not isinstance(parts, dict) or not all(k in parts for k in ("gates", "steps", "knowledge_errors")):
+            errs.append("zero_rule 为“只清讲错的那一部分”时 parts 应为 {gates, steps, knowledge_errors}")
+        else:
+            qids = {q.get("id") for q in obj.get("gate_questions") or []}
+            sids = {x.get("id") for x in obj.get("recommended_steps") or []}
+            if set(parts["gates"]) != qids:
+                errs.append("parts.gates 的键和卡点 id 对不上")
+            if any(v is None for v in parts["gates"].values()):
+                errs.append("parts.gates 不能有 null（每个卡点都要属于一个部分）")
+            if set(parts["steps"]) != sids:
+                errs.append("parts.steps 的键和步骤 id 对不上")
+            ke = parts["knowledge_errors"]
+            if not isinstance(ke, list) or len(ke) != len(obj.get("knowledge_errors") or []):
+                errs.append("parts.knowledge_errors 应与 knowledge_errors 等长（每条知识错误属于第几部分）")
+    elif "parts" in obj and parts is not None:
+        errs.append("zero_rule 为整份清零时 parts 应为 null")
 
 
 def _nonempty_str(v) -> bool:
@@ -117,7 +169,7 @@ def validate_item(obj, split: str) -> list[str]:
     missing = [f for f in FIELDS if f not in obj]
     if missing:
         errs.append(f"缺少字段 {', '.join(missing)}")
-    unknown = [f for f in obj if f not in FIELDS]
+    unknown = [f for f in obj if f not in FIELDS and f not in OPTIONAL_FIELDS]
     if unknown:
         errs.append(f"有未定义字段 {', '.join(unknown)}")
 
@@ -133,8 +185,14 @@ def validate_item(obj, split: str) -> list[str]:
     if _nonempty_str(obj.get("source")) and not SOURCE_RE.match(obj["source"]):
         errs.append(f"source 格式不对：{obj['source']!r}，应为 new、以 real: 开头或 merged:<条目 id>,…")
 
-    if "split" in obj and obj["split"] in SPLITS and obj["split"] != split:
+    if split == "mixed":   # 合并评测集：短题应为 dev，长题应为 test
+        if obj.get("tier") not in TIERS:
+            errs.append("合并评测集里每条都要有 tier（短题 / 长题）")
+        elif obj.get("split") != TIERS[obj["tier"]]:
+            errs.append(f"split 为 {obj.get('split')!r}，tier 为 {obj['tier']} 的条目应为 {TIERS[obj['tier']]!r}")
+    elif "split" in obj and obj["split"] in SPLITS and obj["split"] != split:
         errs.append(f"split 为 {obj['split']!r}，与所在文件不一致（该文件应为 {split!r}）")
+    _check_merged_extra(obj, errs)
 
     if "reader_known" in obj:
         rk = obj["reader_known"]

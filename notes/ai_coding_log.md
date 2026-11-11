@@ -93,3 +93,39 @@
 | 花费 | 按标价 $4.81（生成 $2.68，判分 $2.13），没超过 8 美元 |
 
 数据库改动前的备份：`results/eval.before-v2short.db`（不入库）。
+
+## 2026-11-12 第七份输入：正式测试（合并评测集，原课程 Skill、通用 V1、通用 V2）（Claude Code，claude-opus-5-5）
+
+### 我让 AI 做什么
+
+按《给ClaudeCode的第七份输入.md》：核对 md5、原样提交测试集草稿、放开 schema；六组（三份 Skill × sol / luna）× 30 条长题 × 3 次生成并判分；短题沿用；新写计分模块和单元测试；判两遍 54 份；出正式报告。规则开跑前定死，跑完不改。
+
+### 实际新建、修改的文件
+
+- 原样提交（9d62e9f，提交信息里写了 items_merged.jsonl 的 md5）：`data/items_long_test*`、`data/items_merged*`、`drafts/build_items_long_test*.py`、`drafts/build_items_merged.py`、第七份输入。`drafts/build_items_test.py` 没提交。
+- 新建：`src/merged.py`、`src/testreport.py`、`tests/test_merged.py`、`tests/test_schema_merged.py`、`reports/test_three_skills__judge_v2.md`
+- 修改：
+  - `src/schema.py`：认合并集多出的五个字段并校验（tier、kind、points 合计、zero_rule、parts 的键）；subtype 加“长题”、split 加“test”、source 认 `notes:`；文件名含 merged 时按 tier 检查 split。
+  - `src/run.py`、`src/judge.py`：`--tier`；judge 的 `--repeat` 加 `--strata skill_model`。
+  - `src/summary.py`：第 10 节（COMP 关键词）原来没按条目过滤，会算进长题；改成只算当前条目文件里的条目。
+  - `README.md`、本文件。
+- 没改：任何条目内容、Skill、裁判 prompt、分值。
+
+### 用哪几条命令验证、结果如何
+
+| 检查 | 结果 |
+|---|---|
+| md5：general_v2.md、items_merged.jsonl | 都一致 |
+| `python -m src.schema data/items_merged.jsonl` 等 6 个文件 | 全部通过；分值合计 391 / 577 |
+| 短题沿用：六组各 90 份已判记录的 rubric_sha256 和合并集里的短题 | 540 份全部一致 |
+| 长题生成 540 次（每组 `--workers 16`） | 全部成功，没有截断、没有限速错误（有个别 503 自动重试后成功） |
+| 长题判分 540 份 + 第二遍 54 份（种子 20261114，每组 9 份） | 全部 ok，0 待复核；重判 10 次 |
+| 花费把关：sol 前 58 份长回答出来后估这一轮总花费 | 约 $31，低于 45 美元，继续 |
+| 主结果用两种办法算：附录 SQL、不经过 merged.py 直接从裁判记录按清零规则手算 | 六组完全一致 |
+| 四组汇总、长请求报告、V1 对 V2 短题报告重新生成后和已提交的对比 | 正文都没有变（四组汇总先修了第 10 节的过滤） |
+| `python -m unittest discover -s tests -t .` | 56 个测试通过 |
+| 实际花费 | 按标价 $28.71（生成 $15.25，判分 $13.46） |
+
+主结果：sol 上 V2 − V1 = +8.3 个百分点（77.8% → 86.1%），95% 区间 [+3.6, +13.7]，没有达到 15 个百分点的目标。
+
+数据库改动前的备份：`results/eval.before-test.db`（不入库）。

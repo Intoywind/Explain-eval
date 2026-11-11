@@ -191,6 +191,7 @@ def parse_args(argv):
                     help="只对这次运行设置 max_output_tokens（openai）/ max_tokens（hkust），不改 config；会存进 params_used")
     ap.add_argument("--timeout", type=float, help="只对这次运行放宽请求超时（秒），不改 config")
     ap.add_argument("--workers", type=int, default=1, help="并发调用数，默认 1（逐条）；限速仍按 config")
+    ap.add_argument("--tier", help="只跑 tier 为这个值的条目（合并评测集用：短题 / 长题）")
     ap.add_argument("--stream", action="store_true",
                     help="流式接收（只对 openai）：长输出必须用，非流式请求超过约 60 秒会被网络断开；不进请求哈希")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"), help="配置文件，默认 config.yaml")
@@ -274,6 +275,10 @@ def _main(args, argv) -> int:
         raise UsageError(f"{args.items} 校验未通过（{len(errors)} 处错误），先运行 python -m src.schema {args.items}")
     if any(it["split"] == "holdout" for it in items) and not args.holdout:
         raise UsageError("条目里有 holdout，需显式加 --holdout")
+    if args.tier:   # 合并评测集：只跑这一档（短题 / 长题）
+        items = [it for it in items if it.get("tier") == args.tier]
+        if not items:
+            raise UsageError(f"{args.items} 里没有 tier 为 {args.tier!r} 的条目")
     if not items:
         print(f"{args.items} 没有条目，无事可做。")
         return 0

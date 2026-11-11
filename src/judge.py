@@ -316,11 +316,12 @@ def parse_args(argv):
     ap.add_argument("--repeat", type=int, metavar="N",
                     help="稳定性检查：从第一遍 ok 的当前回答里按课程分层随机抽 N 份，再判一遍，存 repeat_judgments，不进统计")
     ap.add_argument("--seed", type=int, default=20261111, help="--repeat 抽样的随机种子，默认 20261111")
-    ap.add_argument("--strata", choices=["course", "model_course", "model"], default="course",
-                    help="--repeat 的分层：course = 按课程（默认）；model_course = 按（被测模型 × 课程）；model = 按被测模型。"
+    ap.add_argument("--strata", choices=["course", "model_course", "model", "skill_model"], default="course",
+                    help="--repeat 的分层：course = 按课程（默认）；model_course = 按（被测模型 × 课程）；model = 按被测模型；skill_model = 按（Skill 组 × 被测模型）。"
                          "--skill、--model 会先筛选可抽的回答")
     ap.add_argument("--max-output-tokens", type=int, help="只对这次运行设置裁判的 max_output_tokens，不改 config；会存进 params_used")
     ap.add_argument("--timeout", type=float, help="只对这次运行放宽裁判请求超时（秒），不改 config")
+    ap.add_argument("--tier", help="只评 tier 为这个值的条目（合并评测集用：短题 / 长题）")
     ap.add_argument("--stream", action="store_true", help="流式接收裁判输出（长输出用，见 src.run --stream）；不进请求哈希")
     ap.add_argument("--dry-run", action="store_true", help="只打印第一条完整的裁判请求，不调 API")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
@@ -342,6 +343,10 @@ def _main(args, argv) -> int:
     jcfg = apply_overrides(cfg, judge_model_cfg(cfg), args.max_output_tokens, args.timeout, args.stream)
     prompt = load_prompt(Path(args.prompt))
     items_by_id, items_rel = load_items(Path(args.items), args.holdout)
+    if args.tier:   # 合并评测集：只评这一档（短题 / 长题）的回答
+        items_by_id = {k: v for k, v in items_by_id.items() if v.get("tier") == args.tier}
+        if not items_by_id:
+            raise UsageError(f"{args.items} 里没有 tier 为 {args.tier!r} 的条目")
     params = providers.build_params(jcfg, cfg)
     db_path = db_path_from_config(cfg)
 
@@ -600,6 +605,14 @@ def _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> 
 
 # ---------------- 稳定性检查（第二遍） ----------------
 
+def _skill_group(skill_file: str) -> str:
+    """skills/<按课程的目录>/xxx.md → 目录名；其余 → 文件名去掉 .md。"""
+    for d in PER_COURSE_SKILL_DIRS:
+        if skill_file.startswith(f"skills/{d}/"):
+            return d
+    return Path(skill_file).stem
+
+
 def stratified_sample(pool: list[dict], n: int, seed: int, key: str = "course") -> list[dict]:
     """按层分：n 份平均分给各层（层按名字排序，余数给排在前面的层）；
     每层内先按 call_id 排序，再用 random.Random(seed) 抽。同一个池子、同一个种子，结果固定。
@@ -642,7 +655,8 @@ def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) ->
         if j is None or j["status"] != "ok":   # 第一遍待复核或没评过的不抽
             continue
         pool.append({"call_id": r["id"], "row": r, "item": item, "course": item["course"], "first_id": j["id"],
-                     "model_course": f"{r['model_name']}|{item['course']}", "model": r["model_name"]})
+                     "model_course": f"{r['model_name']}|{item['course']}", "model": r["model_name"],
+                     "skill_model": f"{_skill_group(r['skill_file'])}|{r['model_name']}"})
     sample = stratified_sample(pool, args.repeat, args.seed, args.strata)
     todo, n_skip = [], 0
     for s_ in sample:

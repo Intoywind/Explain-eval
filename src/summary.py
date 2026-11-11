@@ -463,6 +463,7 @@ def keyword_section(R: Report) -> list[str]:
     t, rows = R.q("COMP 的 original_eval 当前回答（关键词在 Python 里匹配）", """
 SELECT c.id AS call_id, c.item_id, c.repeat_idx, c.skill_file, c.response_text
 FROM current_calls c
+JOIN items_snapshot s ON s.item_id = c.item_id   -- 只算当前条目文件里的条目（长题等另一套条目不算）
 WHERE c.skill_file LIKE 'skills/original_eval/%' AND c.item_id LIKE 'COMP-%'
 ORDER BY c.item_id, c.repeat_idx""")
     L = [f"## 10. COMP 的 original_eval 回答：要文件路径、“待原题补齐”“非历年真题” [{t}]", "",
