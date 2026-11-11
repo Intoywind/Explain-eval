@@ -29,7 +29,8 @@ src/
   rules.py         规则检查（篇幅、没学过的词）
   blind.py         人工盲打网页导出、人和裁判对比
   report.py        两份 Skill 的比较报告
-  summary.py       三组正式评分的汇总（含裁判稳定性、COMP 关键词、花费）
+  summary.py       四组正式评分的汇总（含裁判稳定性、COMP 关键词、花费）
+  longreport.py    长请求验证报告（单独讲 vs 连着讲）
 tests/             单元测试
   judge_fixtures/  裁判验收样例（make_fixtures.py 从真实回答生成）
 config.yaml        接口、默认参数、模型列表、裁判
@@ -207,6 +208,23 @@ python -m src.summary --judge-prompt prompts/judge_v2.md --out reports/
 
 - 输出 `reports/summary__judge_v2.md`：各组份数；知识通过率、没答全比例、卡点分和步骤分均值（按回答、按条目两种）与分布；两份 Skill × 两档模型的 2×2 表；同一模型下两份 Skill 逐条目的升降条数；ECON-003 按新条目重判前后的变化；逐条目三组对比；知识不通过清单；needs_review 和失败清单；“清单外”备注；gaps 的 severity 分布；裁判稳定性（两遍的一致率和 kappa）；COMP original_eval 回答里要文件路径、“待原题补齐”“非历年真题”的份数和原句；实际花费。
 - 只用 `judgments` 表里的正式评分；第二遍和验收样例不进分数。每个数字后的 [Qn] 指向文末附录的 SQL。
+
+## 长请求验证
+
+```bash
+python -m src.run --skill skills/general_v1.md --model gpt-6.1-sol --items data/items_long_dev.jsonl --repeats 3 \
+    --max-output-tokens 32000 --timeout 1800 --workers 3 --stream
+python -m src.judge --prompt prompts/judge_v2.md --items data/items_long_dev.jsonl --max-output-tokens 32000 --timeout 1800 --stream --workers 6
+python -m src.judge --repeat 12 --seed 20261113 --strata model_course --prompt prompts/judge_v2.md --items data/items_long_dev.jsonl \
+    --max-output-tokens 32000 --timeout 1800 --stream
+python -m src.longreport --out reports/
+```
+
+- `data/items_long_dev.jsonl` 由 `drafts/build_items_long.py` 从 `data/items.jsonl` 拼成：同课同读者版本的 5 条并成一条，卡点、步骤 id 加 `p<i>` 前缀，文字加“（第 i 部分）”；`data/items_long_dev_map.json` 记录对应关系。
+- **流式（`--stream`）**：本机网络会在约 60 秒时断开非流式请求，长输出必须用流式。流式只是传输方式，不进请求哈希。
+- `--max-output-tokens`、`--timeout` 只覆盖这一次运行，不改 config；`max_output_tokens` 进实际发送的参数、存进库，也进请求哈希。
+- 长请求条目 id 与短条目不同，`current_calls` 里互不覆盖；四组汇总、两份 Skill 比较、盲标只认 `data/items.jsonl` 里的条目（`items_snapshot`），长请求数据不进这些报告。
+- 报告 `reports/long_dev__judge_v2.md`：逐卡点（不套知识清零）短 vs 长、按部分/课程/读者分解、步骤、卡点全答上占比（含 5 份短回答按重复序号合一份）、篇幅（按“第 i 部分”标题切开）、知识错误与没答全、待复核、第二遍一致率、花费。
 
 ## 测试
 

@@ -5,6 +5,9 @@ python -m src.run --skill original ...        # 每条按 course 自动选 skill
 python -m src.run --skill original_eval ...   # 同上，从 skills/original_eval/ 里选
 python -m src.run ... --dry-run               # 只组装请求，打印第一条完整内容，不调用 API
 python -m src.run --items data/holdout.jsonl --holdout ...   # 读保留集必须显式加 --holdout
+python -m src.run ... --max-output-tokens 32000 --timeout 1800 --workers 3 --stream   # 只对这次运行覆盖输出上限、超时；并发；流式
+
+--max-output-tokens 会进入实际发送的参数，因而进入请求哈希：同一条目加不加这个参数是两种请求。
 """
 
 from __future__ import annotations
@@ -184,8 +187,29 @@ def parse_args(argv):
     ap.add_argument("--repeats", type=int, default=1, help="每条重复几次，默认 1")
     ap.add_argument("--holdout", action="store_true", help="允许读取保留集（holdout）")
     ap.add_argument("--dry-run", action="store_true", help="只组装请求并打印第一条，不调用 API")
+    ap.add_argument("--max-output-tokens", type=int,
+                    help="只对这次运行设置 max_output_tokens（openai）/ max_tokens（hkust），不改 config；会存进 params_used")
+    ap.add_argument("--timeout", type=float, help="只对这次运行放宽请求超时（秒），不改 config")
+    ap.add_argument("--workers", type=int, default=1, help="并发调用数，默认 1（逐条）；限速仍按 config")
+    ap.add_argument("--stream", action="store_true",
+                    help="流式接收（只对 openai）：长输出必须用，非流式请求超过约 60 秒会被网络断开；不进请求哈希")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"), help="配置文件，默认 config.yaml")
     return ap.parse_args(argv)
+
+
+def apply_overrides(cfg: dict, model_cfg: dict, max_output_tokens: int | None, timeout: float | None,
+                    stream: bool = False) -> dict:
+    """返回加了本次运行覆盖项的模型配置（不改 cfg 里的模型条目）；超时、流式改 cfg 里该接口的设置（只在内存里）。"""
+    if max_output_tokens:
+        key = "max_tokens" if model_cfg["provider"] == "hkust" else "max_output_tokens"
+        model_cfg = {**model_cfg, "params": {**(model_cfg.get("params") or {}), key: int(max_output_tokens)}}
+    if timeout:
+        prov = model_cfg["provider"]
+        cfg["providers"][prov] = {**cfg["providers"][prov], "timeout_seconds": float(timeout)}
+    if stream:
+        prov = model_cfg["provider"]
+        cfg["providers"][prov] = {**cfg["providers"][prov], "stream": True}
+    return model_cfg
 
 
 def print_dry_run(preps: list[Prepared], model_cfg: dict, cfg: dict, repeats: int, db_path: Path) -> None:
@@ -256,7 +280,7 @@ def _main(args, argv) -> int:
 
     # 3. 配置、模型、组装请求
     cfg = load_config(Path(args.config))
-    model_cfg = find_model(cfg, args.model)
+    model_cfg = apply_overrides(cfg, find_model(cfg, args.model), args.max_output_tokens, args.timeout, args.stream)
     preps = prepare(items, args.skill, providers.build_params(model_cfg, cfg))
     db_path = Path((cfg.get("defaults") or {}).get("db_path") or "results/eval.db")
     if not db_path.is_absolute():
@@ -284,17 +308,24 @@ def _main(args, argv) -> int:
     n_ok = n_fail = n_skip = 0
     tok_in = tok_out = 0
     total = len(preps) * args.repeats
+    todo = []
     k = 0
+    for p in preps:
+        for r in range(1, args.repeats + 1):
+            k += 1
+            head = f"[{k}/{total}] {p.item['id']} 第{r}次"
+            if db.has_success(conn, p.item["id"], model_cfg["name"], r, p.request_sha256):
+                n_skip += 1
+                print(f"{head} 跳过（已有成功记录）")
+                continue
+            todo.append((head, p, r))
     try:
-        for p in preps:
-            for r in range(1, args.repeats + 1):
-                k += 1
-                head = f"[{k}/{total}] {p.item['id']} 第{r}次"
-                if db.has_success(conn, p.item["id"], model_cfg["name"], r, p.request_sha256):
-                    n_skip += 1
-                    print(f"{head} 跳过（已有成功记录）")
-                    continue
-                out = providers.call(model_cfg, cfg, p.system, p.user)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            futs = {ex.submit(providers.call, model_cfg, cfg, p.system, p.user): (head, p, r) for head, p, r in todo}
+            for fut in as_completed(futs):
+                head, p, r = futs[fut]
+                out = fut.result()
                 status, error = ("ok", None) if out.ok else ("error", out.error)
                 if out.ok and out.finish_reason == "length":
                     status, error = "error", "回答因长度上限被截断（finish_reason=length），不算成功记录"
@@ -317,10 +348,10 @@ def _main(args, argv) -> int:
                 })
                 if status == "ok":
                     n_ok += 1
-                    print(f"{head} 成功｜输入 {out.input_tokens} 输出 {out.output_tokens} tokens｜{out.latency_s:.1f}s｜{out.model_version}")
+                    print(f"{head} 成功｜输入 {out.input_tokens} 输出 {out.output_tokens} tokens｜{out.latency_s:.1f}s｜{out.model_version}", flush=True)
                 else:
                     n_fail += 1
-                    print(f"{head} 失败｜{error}")
+                    print(f"{head} 失败｜{error}", flush=True)
     except KeyboardInterrupt:
         print("\n已中断；已完成的调用都已写入数据库，再次运行同一命令会跳过它们。")
     finally:

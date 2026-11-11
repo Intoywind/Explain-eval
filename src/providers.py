@@ -165,15 +165,26 @@ def _call_openai(model_cfg: dict, pcfg: dict, key: str, system: str, user: str, 
         # SDK 自带的重试关掉，统一走本模块的重试逻辑，便于计数和记录
         _openai_clients[ck] = openai.OpenAI(api_key=key, timeout=timeout, max_retries=0)
     client = _openai_clients[ck]
+    inputs = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
     try:
-        resp = client.responses.create(
-            model=model_cfg["model_id"],
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            **params,
-        )
+        if pcfg.get("stream"):
+            # 流式：回答边生成边传回，连接上一直有数据。网络上非流式请求超过约 60 秒会被断开（长回答必然超过），
+            # 所以长输出要用流式。stream 只是传输方式，不进 params，不影响请求哈希。
+            resp = None
+            for ev in client.responses.create(model=model_cfg["model_id"], input=inputs, stream=True, **params):
+                if getattr(ev, "type", "") in ("response.completed", "response.incomplete", "response.failed"):
+                    resp = ev.response
+            if resp is None:
+                raise _CallError("流式响应没有收到结束事件", retryable=True)
+        else:
+            resp = client.responses.create(model=model_cfg["model_id"], input=inputs, **params)
+    except _CallError:
+        raise
+    except httpx.HTTPError as e:   # 流式读取中途断开时，httpx 的异常可能不经 SDK 包装直接抛出
+        raise _CallError(f"网络错误：{type(e).__name__}: {e}", retryable=True)
     except openai.RateLimitError as e:
         ra = None
         try:

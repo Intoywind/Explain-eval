@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, providers, rules
-from .run import ROOT, PER_COURSE_SKILL_DIRS, UsageError, _rel, estimate_cost, load_config
+from .run import ROOT, PER_COURSE_SKILL_DIRS, UsageError, _rel, apply_overrides, estimate_cost, load_config
 from .schema import expected_split, validate_file
 from .scoring import JudgeFormatError, parse_judge_output, score
 
@@ -302,6 +302,11 @@ def parse_args(argv):
     ap.add_argument("--repeat", type=int, metavar="N",
                     help="稳定性检查：从第一遍 ok 的当前回答里按课程分层随机抽 N 份，再判一遍，存 repeat_judgments，不进统计")
     ap.add_argument("--seed", type=int, default=20261111, help="--repeat 抽样的随机种子，默认 20261111")
+    ap.add_argument("--strata", choices=["course", "model_course"], default="course",
+                    help="--repeat 的分层：course = 按课程（默认）；model_course = 按（被测模型 × 课程）")
+    ap.add_argument("--max-output-tokens", type=int, help="只对这次运行设置裁判的 max_output_tokens，不改 config；会存进 params_used")
+    ap.add_argument("--timeout", type=float, help="只对这次运行放宽裁判请求超时（秒），不改 config")
+    ap.add_argument("--stream", action="store_true", help="流式接收裁判输出（长输出用，见 src.run --stream）；不进请求哈希")
     ap.add_argument("--dry-run", action="store_true", help="只打印第一条完整的裁判请求，不调 API")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     return ap.parse_args(argv)
@@ -319,7 +324,7 @@ def main(argv=None) -> int:
 
 def _main(args, argv) -> int:
     cfg = load_config(Path(args.config))
-    jcfg = judge_model_cfg(cfg)
+    jcfg = apply_overrides(cfg, judge_model_cfg(cfg), args.max_output_tokens, args.timeout, args.stream)
     prompt = load_prompt(Path(args.prompt))
     items_by_id, items_rel = load_items(Path(args.items), args.holdout)
     params = providers.build_params(jcfg, cfg)
@@ -580,20 +585,21 @@ def _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> 
 
 # ---------------- 稳定性检查（第二遍） ----------------
 
-def stratified_sample(pool: list[dict], n: int, seed: int) -> list[dict]:
-    """按课程分层：n 份平均分给各课程（课程按名字排序，余数给排在前面的课程）；
-    每门课程内，先按 call_id 排序，再用 random.Random(seed) 抽。同一个池子、同一个种子，结果固定。"""
+def stratified_sample(pool: list[dict], n: int, seed: int, key: str = "course") -> list[dict]:
+    """按层分：n 份平均分给各层（层按名字排序，余数给排在前面的层）；
+    每层内先按 call_id 排序，再用 random.Random(seed) 抽。同一个池子、同一个种子，结果固定。
+    key 是每个元素里作为层的字段（默认 course）。"""
     import random
-    by_course: dict[str, list[dict]] = {}
+    by_course: dict = {}
     for r in sorted(pool, key=lambda r: r["call_id"]):
-        by_course.setdefault(r["course"], []).append(r)
+        by_course.setdefault(r[key], []).append(r)
     courses = sorted(by_course)
     rng = random.Random(seed)
     out = []
     for k, c in enumerate(courses):
         want = n // len(courses) + (1 if k < n % len(courses) else 0)
         if want > len(by_course[c]):
-            raise UsageError(f"课程 {c} 只有 {len(by_course[c])} 份可抽，不够 {want} 份")
+            raise UsageError(f"{c} 只有 {len(by_course[c])} 份可抽，不够 {want} 份")
         out += rng.sample(by_course[c], want)
     return sorted(out, key=lambda r: r["call_id"])
 
@@ -612,8 +618,9 @@ def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) ->
             (r["id"], jcfg["name"], prompt.sha256, rubric_hash(item))).fetchone()
         if j is None or j["status"] != "ok":   # 第一遍待复核或没评过的不抽
             continue
-        pool.append({"call_id": r["id"], "row": r, "item": item, "course": item["course"], "first_id": j["id"]})
-    sample = stratified_sample(pool, args.repeat, args.seed)
+        pool.append({"call_id": r["id"], "row": r, "item": item, "course": item["course"], "first_id": j["id"],
+                     "model_course": f"{r['model_name']}|{item['course']}"})
+    sample = stratified_sample(pool, args.repeat, args.seed, args.strata)
     todo, n_skip = [], 0
     for s_ in sample:
         user = fill_user(prompt.user_template, s_["item"], s_["row"]["response_text"])
@@ -623,9 +630,9 @@ def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) ->
             n_skip += 1
             continue
         todo.append((s_, user))
-    courses = sorted({s_["course"] for s_ in sample})
-    print(f"可抽 {len(pool)} 份（第一遍 ok）｜种子 {args.seed}｜抽中 {len(sample)} 份："
-          + "，".join(f"{c} {sum(s_['course'] == c for s_ in sample)}" for c in courses)
+    courses = sorted({s_[args.strata] for s_ in sample})
+    print(f"可抽 {len(pool)} 份（第一遍 ok）｜种子 {args.seed}｜分层 {args.strata}｜抽中 {len(sample)} 份："
+          + "，".join(f"{c} {sum(s_[args.strata] == c for s_ in sample)}" for c in courses)
           + f"｜待评 {len(todo)}，已评过跳过 {n_skip}")
     print("抽中的 call_id：" + ",".join(str(s_["call_id"]) for s_ in sample))
     if args.dry_run:

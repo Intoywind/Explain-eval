@@ -1,7 +1,7 @@
 # 三组正式评分汇总（prompts/judge_v2.md）
 
 - 裁判：gpt-6.1-terra（gpt-6.1-terra），prompt `prompts/judge_v2.md`（sha256 5e5764690400…）；条目文件 `data/items.jsonl`
-- 生成时间：2026-11-11T12:48:27+00:00
+- 生成时间：2026-11-11T13:29:38+00:00
 - 组 = Skill 组 × 被测模型。知识不通过的回答卡点分、步骤分按 0 计；待复核、失败的不计分，单独列出。
 - 均值给两种：按回答平均；按条目平均（条目内先平均，再在条目间平均）。两者只在有回答不计分时才可能不同。
 - 每个数字后的 [Qn] 指向文末附录的 SQL。
@@ -562,6 +562,7 @@ SELECT r.id AS repeat_id, r.judge_run_id, r.sample_seed, r.call_id, r.item_id, r
        j.gate_num AS g1, r.gate_num AS g2, j.gate_den AS gden, j.step_num AS s1, r.step_num AS s2, j.step_den AS sden,
        j.parsed_json AS p1, r.parsed_json AS p2
 FROM repeat_judgments r JOIN judgments j ON j.id = r.first_judgment_id
+JOIN items_snapshot s ON s.item_id = r.item_id   -- 只算当前条目文件里的条目（长请求等另一套条目不算）
 WHERE r.judge_model_name = 'gpt-6.1-terra' AND r.prompt_sha256 = '5e576469040012f66469e9d7d727f0ffe4b3972bd4c04ce959edba8a9efa3136'
 ORDER BY r.call_id
 ```
@@ -583,10 +584,11 @@ SELECT jr.judge_run_id, coalesce(jr.purpose, 'main') AS purpose, jr.started_at, 
        sum(CASE WHEN x.attempts = 1 THEN 0 ELSE 1 END) AS n_multi,
        sum(coalesce(json_extract(x.usage_raw, '$.input_tokens_details.cached_tokens'), 0)) AS cached_last
 FROM judge_runs jr
-JOIN (SELECT id, judge_run_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
+JOIN (SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
       UNION ALL
-      SELECT id, judge_run_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
+      SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
   ON x.judge_run_id = jr.judge_run_id
+JOIN items_snapshot s ON s.item_id = x.item_id   -- 只算当前条目文件里的条目
 WHERE jr.prompt_sha256 = '5e576469040012f66469e9d7d727f0ffe4b3972bd4c04ce959edba8a9efa3136'
 GROUP BY jr.judge_run_id ORDER BY jr.started_at
 ```

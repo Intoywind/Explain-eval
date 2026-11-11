@@ -363,6 +363,7 @@ SELECT r.id AS repeat_id, r.judge_run_id, r.sample_seed, r.call_id, r.item_id, r
        j.gate_num AS g1, r.gate_num AS g2, j.gate_den AS gden, j.step_num AS s1, r.step_num AS s2, j.step_den AS sden,
        j.parsed_json AS p1, r.parsed_json AS p2
 FROM repeat_judgments r JOIN judgments j ON j.id = r.first_judgment_id
+JOIN items_snapshot s ON s.item_id = r.item_id   -- 只算当前条目文件里的条目（长请求等另一套条目不算）
 WHERE r.judge_model_name = {_q(judge_name)} AND r.prompt_sha256 = {_q(prompt_sha)}
 ORDER BY r.call_id""")
     L = [f"## 9. 裁判稳定性：抽 30 份判第二遍 [{t}]", ""]
@@ -495,10 +496,11 @@ SELECT jr.judge_run_id, coalesce(jr.purpose, 'main') AS purpose, jr.started_at, 
        sum(CASE WHEN x.attempts = 1 THEN 0 ELSE 1 END) AS n_multi,
        sum(coalesce(json_extract(x.usage_raw, '$.input_tokens_details.cached_tokens'), 0)) AS cached_last
 FROM judge_runs jr
-JOIN (SELECT id, judge_run_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
+JOIN (SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM judgments
       UNION ALL
-      SELECT id, judge_run_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
+      SELECT id, judge_run_id, item_id, input_tokens, output_tokens, attempts, usage_raw FROM repeat_judgments) x
   ON x.judge_run_id = jr.judge_run_id
+JOIN items_snapshot s ON s.item_id = x.item_id   -- 只算当前条目文件里的条目
 WHERE jr.prompt_sha256 = {_q(prompt_sha)}
 GROUP BY jr.judge_run_id ORDER BY jr.started_at""")
     L = [f"## 11. 实际花费 [{t}]", "",
