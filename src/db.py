@@ -233,6 +233,34 @@ CREATE TABLE IF NOT EXISTS known_judgments (
     error            TEXT
 );
 
+-- 裁判稳定性检查：从第一遍 ok 的回答里按课程分层抽样，同一裁判、同一版请求再判一遍。
+-- 单独一张表，不进任何评分统计；first_judgment_id 指向第一遍的那条 judgments 记录。
+CREATE TABLE IF NOT EXISTS repeat_judgments (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    judge_run_id        TEXT NOT NULL REFERENCES judge_runs(judge_run_id),
+    first_judgment_id   INTEGER NOT NULL REFERENCES judgments(id),
+    call_id             INTEGER NOT NULL REFERENCES calls(id),
+    item_id             TEXT NOT NULL,
+    course              TEXT NOT NULL,
+    sample_seed         INTEGER NOT NULL,
+    judge_model_name    TEXT NOT NULL,
+    judge_model_version TEXT,
+    prompt_file         TEXT NOT NULL,
+    prompt_sha256       TEXT NOT NULL,
+    rubric_sha256       TEXT NOT NULL,
+    request_sha256      TEXT NOT NULL,
+    params_used         TEXT NOT NULL,
+    raw_output          TEXT,
+    parsed_json         TEXT,
+    flags               TEXT,
+    knowledge_pass      INTEGER, incomplete INTEGER,
+    gate_num INTEGER, gate_den INTEGER, step_num INTEGER, step_den INTEGER, gate_all INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, usage_raw TEXT, latency_s REAL, attempts INTEGER,
+    created_at          TEXT NOT NULL,
+    status              TEXT NOT NULL CHECK (status IN ('ok', 'error', 'needs_review')),
+    error               TEXT
+);
+
 -- 裁判验收样例（tests/judge_fixtures/）的裁判结果：只用来验收裁判，不进入任何评分统计
 CREATE TABLE IF NOT EXISTS fixture_judgments (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,6 +347,9 @@ def migrate_judge(conn) -> None:
     if "n_needs_review" not in cols:
         with conn:
             conn.execute("ALTER TABLE judge_runs ADD COLUMN n_needs_review INTEGER")
+    if "purpose" not in cols:   # main = 正式评分；repeat = 稳定性检查（第二遍）；旧记录为 NULL
+        with conn:
+            conn.execute("ALTER TABLE judge_runs ADD COLUMN purpose TEXT")
 
 
 def connect_readonly(path: str | Path) -> sqlite3.Connection | None:
@@ -458,6 +489,17 @@ def upsert_rule_check(conn, row: dict) -> None:
 def insert_known(conn, row: dict) -> None:
     with conn:
         _insert(conn, "known_judgments", row)
+
+
+def insert_repeat(conn, row: dict) -> None:
+    with conn:
+        _insert(conn, "repeat_judgments", row)
+
+
+def has_repeat(conn, call_id: int, judge_model_name: str, request_sha256: str, seed: int) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM repeat_judgments WHERE call_id=? AND judge_model_name=? AND request_sha256=? AND sample_seed=?"
+        " AND status IN ('ok', 'needs_review') LIMIT 1", (call_id, judge_model_name, request_sha256, seed)).fetchone() is not None
 
 
 def insert_fixture(conn, row: dict) -> None:

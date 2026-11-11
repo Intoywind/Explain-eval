@@ -6,6 +6,7 @@ python -m src.judge --prompt prompts/judge_v2.md --skill skills/general_v1.md --
 python -m src.judge --prompt prompts/judge_v2.md --call-ids 3,40,77
 python -m src.judge --known --prompt prompts/judge_v2.md         # 已知样本检查（data/known_cases.jsonl），不进统计
 python -m src.judge --fixtures --prompt prompts/judge_v2.md      # 裁判验收样例（tests/judge_fixtures/），存 fixture_judgments，不进统计
+python -m src.judge --repeat 30 --seed 20261111 --prompt prompts/judge_v2.md   # 稳定性检查：按课程分层抽 30 份再判一遍，存 repeat_judgments
 
 “当前回答”见 db.current_calls：同一个（条目、被测模型、Skill 文件、第几次重复）取最新的成功记录。
 断点续跑：同一份回答、同一个裁判模型、同一个裁判请求哈希（prompt、条目判分清单、参数、讲解任何一处变了都会变）
@@ -298,6 +299,9 @@ def parse_args(argv):
     ap.add_argument("--known", action="store_true", help="已知样本检查：评 data/known_cases.jsonl，不进统计")
     ap.add_argument("--fixtures", action="store_true",
                     help="裁判验收样例：评 tests/judge_fixtures/manifest.json 里的样例，结果存 fixture_judgments 表，不进统计")
+    ap.add_argument("--repeat", type=int, metavar="N",
+                    help="稳定性检查：从第一遍 ok 的当前回答里按课程分层随机抽 N 份，再判一遍，存 repeat_judgments，不进统计")
+    ap.add_argument("--seed", type=int, default=20261111, help="--repeat 抽样的随机种子，默认 20261111")
     ap.add_argument("--dry-run", action="store_true", help="只打印第一条完整的裁判请求，不调 API")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     return ap.parse_args(argv)
@@ -325,6 +329,8 @@ def _main(args, argv) -> int:
         return _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path)
     if args.fixtures:
         return _main_fixtures(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path)
+    if args.repeat:
+        return _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path)
 
     # 选回答。dry-run 只读打开，不建表不写库
     if args.dry_run:
@@ -371,7 +377,7 @@ def _main(args, argv) -> int:
     run_id = "J" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
     db.start_judge_run(conn, {"judge_run_id": run_id, "started_at": _now(),
                               "argv": ["python", "-m", "src.judge", *argv], "judge_model_name": jcfg["name"],
-                              "prompt_file": prompt.rel, "prompt_sha256": prompt.sha256})
+                              "prompt_file": prompt.rel, "prompt_sha256": prompt.sha256, "purpose": "main"})
     print(f"judge_run_id {run_id}｜裁判 {jcfg['name']}（{jcfg['provider']}）｜prompt {prompt.rel}（{prompt.sha256[:12]}）"
           f"｜待评 {len(todo)} 份，跳过 {n_skip} 份｜参数 {params}｜规则检查已更新 {n_rules} 份")
     if not_in_items:
@@ -570,6 +576,122 @@ def _main_known(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> 
     conn.close()
     print(f"已知样本 {len(built)} 条，不一致 {n_mismatch} 条（这些记录存在 known_judgments 表，不进入任何统计）")
     return 0
+
+
+# ---------------- 稳定性检查（第二遍） ----------------
+
+def stratified_sample(pool: list[dict], n: int, seed: int) -> list[dict]:
+    """按课程分层：n 份平均分给各课程（课程按名字排序，余数给排在前面的课程）；
+    每门课程内，先按 call_id 排序，再用 random.Random(seed) 抽。同一个池子、同一个种子，结果固定。"""
+    import random
+    by_course: dict[str, list[dict]] = {}
+    for r in sorted(pool, key=lambda r: r["call_id"]):
+        by_course.setdefault(r["course"], []).append(r)
+    courses = sorted(by_course)
+    rng = random.Random(seed)
+    out = []
+    for k, c in enumerate(courses):
+        want = n // len(courses) + (1 if k < n % len(courses) else 0)
+        if want > len(by_course[c]):
+            raise UsageError(f"课程 {c} 只有 {len(by_course[c])} 份可抽，不够 {want} 份")
+        out += rng.sample(by_course[c], want)
+    return sorted(out, key=lambda r: r["call_id"])
+
+
+def _main_repeat(args, argv, cfg, jcfg, prompt, items_by_id, params, db_path) -> int:
+    conn = db.connect(db_path)
+    pool = []
+    for r in conn.execute("SELECT id, item_id, model_name, skill_file, repeat_idx, response_text FROM current_calls"
+                          " ORDER BY id").fetchall():
+        item = items_by_id.get(r["item_id"])
+        if item is None:
+            continue
+        j = conn.execute(
+            "SELECT id, status FROM judgments WHERE id = (SELECT max(id) FROM judgments WHERE call_id=? AND"
+            " judge_model_name=? AND prompt_sha256=? AND rubric_sha256=? AND status IN ('ok','needs_review'))",
+            (r["id"], jcfg["name"], prompt.sha256, rubric_hash(item))).fetchone()
+        if j is None or j["status"] != "ok":   # 第一遍待复核或没评过的不抽
+            continue
+        pool.append({"call_id": r["id"], "row": r, "item": item, "course": item["course"], "first_id": j["id"]})
+    sample = stratified_sample(pool, args.repeat, args.seed)
+    todo, n_skip = [], 0
+    for s_ in sample:
+        user = fill_user(prompt.user_template, s_["item"], s_["row"]["response_text"])
+        check_no_leak(s_["item"], cfg, user, s_["row"]["response_text"])
+        req = db.request_hash(prompt.system, user, params)
+        if db.has_repeat(conn, s_["call_id"], jcfg["name"], req, args.seed):
+            n_skip += 1
+            continue
+        todo.append((s_, user))
+    courses = sorted({s_["course"] for s_ in sample})
+    print(f"可抽 {len(pool)} 份（第一遍 ok）｜种子 {args.seed}｜抽中 {len(sample)} 份："
+          + "，".join(f"{c} {sum(s_['course'] == c for s_ in sample)}" for c in courses)
+          + f"｜待评 {len(todo)}，已评过跳过 {n_skip}")
+    print("抽中的 call_id：" + ",".join(str(s_["call_id"]) for s_ in sample))
+    if args.dry_run:
+        conn.close()
+        return 0
+
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+    providers.require_key(jcfg["provider"], cfg)
+    run_id = "R" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+    db.start_judge_run(conn, {"judge_run_id": run_id, "started_at": _now(),
+                              "argv": ["python", "-m", "src.judge", *argv], "judge_model_name": jcfg["name"],
+                              "prompt_file": prompt.rel, "prompt_sha256": prompt.sha256, "purpose": "repeat"})
+    print(f"judge_run_id {run_id}｜结果存 repeat_judgments，不进统计")
+
+    def work(t):
+        s_, user = t
+        return run_judge(jcfg, cfg, prompt.system, user, s_["item"], s_["row"]["response_text"],
+                         log=lambda m, cid=s_["call_id"]: print(f"  [call {cid}] {m.strip()}"))
+
+    n_ok = n_fail = n_review = tin = tout = 0
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        futs = {ex.submit(work, t): t for t in todo}
+        for k, fut in enumerate(as_completed(futs), 1):
+            s_, user = futs[fut]
+            res = fut.result()
+            tin += res.input_tokens
+            tout += res.output_tokens
+            item = s_["item"]
+            row = {"judge_run_id": run_id, "first_judgment_id": s_["first_id"], "call_id": s_["call_id"],
+                   "item_id": item["id"], "course": s_["course"], "sample_seed": args.seed,
+                   "judge_model_name": jcfg["name"],
+                   "judge_model_version": res.last.model_version if res.last else None,
+                   "prompt_file": prompt.rel, "prompt_sha256": prompt.sha256, "rubric_sha256": rubric_hash(item),
+                   "request_sha256": db.request_hash(prompt.system, user, res.last.params_sent if res.last else params),
+                   "params_used": {"sent": res.last.params_sent if res.last else params,
+                                   "reported_by_api": res.last.params_reported if res.last else None},
+                   "raw_output": res.raw, "input_tokens": res.input_tokens, "output_tokens": res.output_tokens,
+                   "usage_raw": res.last.usage_raw if res.last else None, "latency_s": res.latency_s,
+                   "attempts": res.attempts, "created_at": _now(), "status": res.status, "error": res.error}
+            if res.parsed is not None:
+                row.update({"parsed_json": parsed_json(res.parsed),
+                            "flags": {**res.parsed.flags(), "rejudge_history": res.history or []}})
+            else:
+                row["flags"] = {"rejudge_history": res.history or []}
+            if res.ok:
+                sc = score(res.parsed)
+                row.update({"knowledge_pass": int(sc.knowledge_pass), "incomplete": int(sc.incomplete),
+                            "gate_num": sc.gate_num, "gate_den": sc.gate_den, "step_num": sc.step_num,
+                            "step_den": sc.step_den, "gate_all": int(sc.gate_all)})
+                n_ok += 1
+            elif res.status == "needs_review":
+                n_review += 1
+            else:
+                n_fail += 1
+            db.insert_repeat(conn, row)
+            print(f"[{k}/{len(todo)}] call {s_['call_id']} {item['id']} {res.status}"
+                  + (f"｜重判 {res.n_rejudge} 次" if res.n_rejudge else "") + (f"｜{res.error}" if res.error else ""))
+    db.finish_judge_run(conn, run_id, finished_at=_now(), n_ok=n_ok, n_failed=n_fail, n_skipped=n_skip,
+                        n_needs_review=n_review, input_tokens=tin, output_tokens=tout)
+    conn.close()
+    cost = estimate_cost(jcfg, tin, tout)
+    print("-" * 72)
+    print(f"成功 {n_ok}，失败 {n_fail}，待复核 {n_review}，跳过 {n_skip}｜输入 {tin}，输出 {tout} tokens｜费用 "
+          + (f"约 ${cost:.4f}（按标价）" if cost is not None else "未估算"))
+    return 0 if n_fail == 0 and n_review == 0 else 1
 
 
 # ---------------- 裁判验收样例 ----------------

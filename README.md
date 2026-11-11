@@ -29,7 +29,9 @@ src/
   rules.py         规则检查（篇幅、没学过的词）
   blind.py         人工盲打网页导出、人和裁判对比
   report.py        两份 Skill 的比较报告
+  summary.py       三组正式评分的汇总（含裁判稳定性、COMP 关键词、花费）
 tests/             单元测试
+  judge_fixtures/  裁判验收样例（make_fixtures.py 从真实回答生成）
 config.yaml        接口、默认参数、模型列表、裁判
 results/eval.db    运行结果（不入库）
 blind/             盲打网页和对应表（不入库）
@@ -131,6 +133,7 @@ python -m src.judge --prompt prompts/judge_v2.md --skill skills/general_v1.md --
 python -m src.judge --prompt prompts/judge_v2.md --call-ids 16,31
 python -m src.judge --known --prompt prompts/judge_v2.md        # 已知样本检查（data/known_cases.jsonl，不存在就跳过）
 python -m src.judge --fixtures --prompt prompts/judge_v2.md     # 裁判验收样例（tests/judge_fixtures/，先运行其中的 make_fixtures.py 生成）
+python -m src.judge --repeat 30 --seed 20261111 --prompt prompts/judge_v2.md   # 裁判稳定性：抽 30 份判第二遍
 ```
 
 - 裁判模型在 `config.yaml` 的 `judge:` 下配置。gpt-6.1-terra 在默认推理强度下不接受 temperature，所以不发；接口回报的实际参数存进 `judgments.params_used`。
@@ -139,6 +142,7 @@ python -m src.judge --fixtures --prompt prompts/judge_v2.md     # 裁判验收�
 - **断点续跑**：同一份回答、同一个裁判模型、同一个裁判请求哈希（prompt、判分清单、参数、讲解任何一处变了都会变）已有成功记录就跳过。所以改了卡点问题或推荐步骤，旧回答会被重新评，旧记录保留。
 - **格式重试**：裁判输出不是合法 JSON、缺字段、类型不对、gaps 的 subtype/severity 不在允许值里、或 gate/steps 的 id 和条目对不上，最多再判 2 次；仍失败记 `error` 继续。和证据不合格的重判共用这 2 次。网络类错误另按 `defaults.retry` 重试。
 - `--workers`（默认 4）并发调用，限速仍按 config。
+- **稳定性检查**（`--repeat N --seed S`）：从第一遍 ok 的当前回答里按课程分层随机抽 N 份（N 平均分给各课程，余数给课程名排在前面的；课程内按 call_id 排序后用 `random.Random(seed)` 抽），同一裁判、同一版请求再判一遍。结果存 `repeat_judgments`，单独一个 judge_run（`judge_runs.purpose = 'repeat'`），不进任何分数。
 
 ### 记分（代码算，裁判不直接给分）
 
@@ -165,6 +169,8 @@ python -m src.judge --fixtures --prompt prompts/judge_v2.md     # 裁判验收�
 - `rule_checks`：每份回答的字符数、用到了哪些“没学过”的词和第一次出现的位置（只做字符串匹配，仅供参考）。`python -m src.rules` 单独刷新，裁判运行时也会自动刷新。
 - `known_judgments`：已知样本检查的记录，不进入任何统计。
 - `fixture_judgments`：裁判验收样例的记录（含 manifest 里的预期、实际值、是否符合、重判记录），不进入任何统计。
+- `repeat_judgments`：稳定性检查的第二遍，`first_judgment_id` 指向第一遍的 judgments 记录，记下抽样种子；不进入任何分数。
+- `judge_runs.purpose`：`main` = 正式评分，`repeat` = 稳定性检查；更早的记录为空。
 
 ## 人工盲打
 
@@ -190,6 +196,15 @@ python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-
 - 每个数字后面的 [Qn] 指向文末附录的 SQL，可以直接在 `sqlite3 results/eval.db` 里运行。报告运行时会把当前条目元数据写进 `items_snapshot`、`items_gate`、`items_steps` 三张表供 SQL 关联。
 - 单列：各组的 needs_review 份数和清单；裁判 note 以“清单外：”开头的结果（条目、回答 id、note 原文）。
 - 只报数字，不做显著性检验，不下结论。
+
+## 三组汇总
+
+```bash
+python -m src.summary --judge-prompt prompts/judge_v2.md --out reports/
+```
+
+- 输出 `reports/summary__judge_v2.md`：各组份数；知识通过率、没答全比例、卡点分和步骤分均值（按回答、按条目两种）与分布；逐条目三组对比；知识不通过清单；needs_review 和失败清单；“清单外”备注；gaps 的 severity 分布；裁判稳定性（两遍的一致率和 kappa）；COMP original_eval 回答里要文件路径、“待原题补齐”“非历年真题”的份数和原句；实际花费。
+- 只用 `judgments` 表里的正式评分；第二遍和验收样例不进分数。每个数字后的 [Qn] 指向文末附录的 SQL。
 
 ## 测试
 
