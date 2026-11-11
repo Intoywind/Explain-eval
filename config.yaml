@@ -39,7 +39,8 @@ models:
   - name: gpt-6.1-sol
     provider: openai
     model_id: gpt-6.1-sol
-    params: {}
+    params:
+      reasoning: {effort: medium}   # 写死推理强度；temperature 不设，用接口默认值
     price_per_1m_tokens:   # OpenAI 标准价（2026-11 查询）；推理 token 按输出价计；未计缓存折扣，估算偏高
       input: 2.0
       output: 10.0
