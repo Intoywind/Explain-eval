@@ -26,7 +26,13 @@ from .judge import ROOT, db_path_from_config, judge_model_cfg, load_items, load_
 from .report import Report, _f, _md, _q, snapshot_items
 from .run import UsageError, _rel, load_config
 
-GROUP_ORDER = ["general_v1 × gpt-6.1-sol", "original_eval × gpt-6.1-sol", "general_v1 × gpt-6-luna"]
+GROUP_ORDER = ["general_v1 × gpt-6.1-sol", "original_eval × gpt-6.1-sol",
+               "general_v1 × gpt-6-luna", "original_eval × gpt-6-luna"]
+SHORT = {"general_v1 × gpt-6.1-sol": "通用·sol", "original_eval × gpt-6.1-sol": "原版·sol",
+         "general_v1 × gpt-6-luna": "通用·luna", "original_eval × gpt-6-luna": "原版·luna"}
+SKILLS = ["general_v1", "original_eval"]
+MODELS = ["gpt-6.1-sol", "gpt-6-luna"]
+EPS = 1e-9
 
 # COMP original_eval 关键词：向用户要文件路径 / 写了“待原题补齐”“非历年真题”
 ASK_PATH_RE = r"(文件|PDF|pdf|本地)?路径|上传|请(你)?(提供|发送|发来|给出|贴出)[^。\n]{0,12}(文件|PDF|pdf|原题|题目|试卷)"
@@ -112,6 +118,42 @@ FROM per_item GROUP BY grp""")
                  f"| {_f(r['step'])} | {_f(i.get('step'))} | {_pct(r['gate_all'])} |")
     L += ["", "卡点全答上 = 知识通过且所有卡点问题都答上。", ""]
 
+    # 2b. 2×2
+    by_g = {r["grp"]: r for r in main}
+    L += [f"## 2b. 两份 Skill × 两档模型 [{t2}]", "",
+          "每格：卡点分均值 / 步骤分均值 / 卡点全答上比例（按回答平均，只算 ok；所有回答都 ok 时与按条目平均相同）。", "",
+          "| Skill \\ 模型 | " + " | ".join(MODELS) + " |", "|---|" + "---|" * len(MODELS)]
+    for sk in SKILLS:
+        cells = []
+        for m in MODELS:
+            r = by_g.get(f"{sk} × {m}")
+            cells.append("—" if r is None else f"{_f(r['gate'])} / {_f(r['step'])} / {_pct(r['gate_all'])}")
+        L.append(f"| {sk} | " + " | ".join(cells) + " |")
+    L.append("")
+
+    # 2c. 同一模型下两份 Skill 的逐条目比较
+    t2c, pi2 = R.q("逐条目 × 组的卡点分、步骤分（条目内平均，只算 ok）", SEL + """
+SELECT item_id, grp, avg(1.0 * gate_num / gate_den) AS gate, avg(1.0 * step_num / step_den) AS step
+FROM sel WHERE status = 'ok' GROUP BY item_id, grp""")
+    pm = {(r["item_id"], r["grp"]): r for r in pi2}
+    L += [f"## 2c. 同一模型下两份 Skill 的逐条目比较（original_eval 相对 general_v1）[{t2c}]", "",
+          "每条条目先在条目内对 3 次重复取平均，再比较 original_eval 和 general_v1；两边都有结果的条目才计入。", "",
+          "| 模型 | 指标 | 条目数 | original_eval 更高 | 持平 | original_eval 更低 | 平均差 |", "|---|---|---|---|---|---|---|"]
+    for m in MODELS:
+        for metric, label in (("gate", "卡点分"), ("step", "步骤分（附）")):
+            diffs = []
+            for iid in sorted(items_by_id):
+                a, b = pm.get((iid, f"general_v1 × {m}")), pm.get((iid, f"original_eval × {m}"))
+                if a and b:
+                    diffs.append(b[metric] - a[metric])
+            if not diffs:
+                L.append(f"| {m} | {label} | 0 | — | — | — | — |")
+                continue
+            up = sum(d > EPS for d in diffs)
+            dn = sum(d < -EPS for d in diffs)
+            L.append(f"| {m} | {label} | {len(diffs)} | {up} | {len(diffs) - up - dn} | {dn} | {sum(diffs) / len(diffs):+.3f} |")
+    L.append("")
+
     # 3. 分布
     t4, gd = R.q("卡点分分布（每份 ok 回答的 gate_num/gate_den）", SEL + """
 SELECT grp, round(1.0 * gate_num / gate_den, 3) AS v, sum(knowledge_pass = 0) AS n_k_fail, count(*) AS n
@@ -153,8 +195,7 @@ SELECT item_id, grp, count(*) AS n_ok, sum(knowledge_pass) AS n_k_pass, sum(inco
        avg(1.0 * gate_num / gate_den) AS gate, avg(1.0 * step_num / step_den) AS step
 FROM sel WHERE status = 'ok' GROUP BY item_id, grp ORDER BY item_id""")
     pmap = {(r["item_id"], r["grp"]): r for r in pi}
-    short = {"general_v1 × gpt-6.1-sol": "通用·sol", "original_eval × gpt-6.1-sol": "原版·sol",
-             "general_v1 × gpt-6-luna": "通用·luna"}
+    short = SHORT
     L += [f"## 4. 逐条目三组对比 [{t6}]", "",
           "每格：知识通过份数/ok 份数 · 卡点分 · 步骤分（条目内几次重复的平均）。“没答全”列出该组 incomplete 的份数。"
           "组名缩写：" + "，".join(f"{v} = {k}" for k, v in short.items()) + "。", "",
@@ -250,6 +291,9 @@ WHERE sel.status = 'ok' GROUP BY sel.grp, g.severity, g.subtype, g.quote_valid""
         L.append(f"| {g} | " + " | ".join(cells) + " |")
     L.append("")
 
+    # 8b. ECON-003 重判前后
+    L += rejudge_section(R, judge_name, prompt.sha256, "ECON-003-%")
+
     # 9. 稳定性
     L += consistency_section(R, judge_name, prompt.sha256)
 
@@ -268,6 +312,47 @@ WHERE sel.status = 'ok' GROUP BY sel.grp, g.severity, g.subtype, g.quote_valid""
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"summary__{Path(prompt.rel).stem}.md"
     return "\n".join(L) + "\n", out
+
+
+def rejudge_section(R: Report, judge_name: str, prompt_sha: str, like: str) -> list[str]:
+    t, rows = R.q("条目改动前后的裁判结果：同一份当前回答，旧判分清单的最新 ok 记录 vs 当前判分清单的最新 ok 记录", f"""
+SELECT CASE WHEN c.skill_file LIKE 'skills/original_eval/%' THEN 'original_eval'
+            ELSE replace(replace(c.skill_file, 'skills/', ''), '.md', '') END || ' × ' || c.model_name AS grp,
+       c.id AS call_id, c.item_id, c.repeat_idx,
+       o.id AS old_id, o.knowledge_pass AS k_old, o.gate_num AS g_old, o.gate_den AS gd_old,
+       o.step_num AS s_old, o.step_den AS sd_old, json_extract(o.parsed_json, '$.knowledge_error.which') AS which_old,
+       n.id AS new_id, n.knowledge_pass AS k_new, n.gate_num AS g_new, n.gate_den AS gd_new,
+       n.step_num AS s_new, n.step_den AS sd_new, json_extract(n.parsed_json, '$.knowledge_error.which') AS which_new,
+       json_extract(n.parsed_json, '$.knowledge_error.note') AS note_new
+FROM current_calls c
+JOIN items_snapshot s ON s.item_id = c.item_id
+LEFT JOIN judgments n ON n.id = (
+     SELECT max(x.id) FROM judgments x WHERE x.call_id = c.id AND x.status = 'ok'
+       AND x.judge_model_name = {_q(judge_name)} AND x.prompt_sha256 = {_q(prompt_sha)} AND x.rubric_sha256 = s.rubric_sha256)
+LEFT JOIN judgments o ON o.id = (
+     SELECT max(x.id) FROM judgments x WHERE x.call_id = c.id AND x.status = 'ok'
+       AND x.judge_model_name = {_q(judge_name)} AND x.prompt_sha256 = {_q(prompt_sha)} AND x.rubric_sha256 != s.rubric_sha256)
+WHERE c.item_id LIKE {_q(like)}
+ORDER BY c.item_id, grp, c.repeat_idx""")
+    title = like.rstrip("-%")
+    both = [r for r in rows if r["old_id"] and r["new_id"]]
+    kchg = [r for r in both if r["k_old"] != r["k_new"]]
+    L = [f"## 8b. {title} 按新条目重判前后 [{t}]", "",
+         f"- {title} 当前回答 {len(rows)} 份；按新条目判过的 {sum(bool(r['new_id']) for r in rows)} 份；"
+         f"有旧判分可比的 {len(both)} 份（没有旧判分的是条目改动后才生成的回答）。旧判分保留在库里，不进上面任何统计。",
+         f"- 知识判断变了的 {len(kchg)} 份；卡点分变了的 {sum((r['g_old'], r['gd_old']) != (r['g_new'], r['gd_new']) for r in both)} 份；"
+         f"步骤分变了的 {sum((r['s_old'], r['sd_old']) != (r['s_new'], r['sd_new']) for r in both)} 份。", "",
+         "| 组 | 条目 | call | 第几次 | 知识（旧 → 新） | 卡点分（旧 → 新） | 步骤分（旧 → 新） | 旧 which |", "|---|---|---|---|---|---|---|---|"]
+    kp = lambda v: "—" if v is None else ("通过" if v else "**不通过**")
+    for r in rows:
+        fr = lambda a, b, ok: f"{a}/{b}" if ok else "—"
+        k = f"{kp(r['k_old'])} → {kp(r['k_new'])}" + (" ⚑" if r["old_id"] and r["new_id"] and r["k_old"] != r["k_new"] else "")
+        g = f"{fr(r['g_old'], r['gd_old'], r['old_id'])} → {fr(r['g_new'], r['gd_new'], r['new_id'])}"
+        st = f"{fr(r['s_old'], r['sd_old'], r['old_id'])} → {fr(r['s_new'], r['sd_new'], r['new_id'])}"
+        L.append(f"| {r['grp']} | {r['item_id']} | {r['call_id']} | {r['repeat_idx']} | {k} | {g} | {st} | "
+                 f"{_md('；'.join(json.loads(r['which_old'] or '[]')))} |")
+    L += ["", "⚑ = 知识判断变了。", ""]
+    return L
 
 
 def consistency_section(R: Report, judge_name: str, prompt_sha: str) -> list[str]:

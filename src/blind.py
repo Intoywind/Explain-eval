@@ -1,6 +1,7 @@
 """人工盲打：导出盲打网页，以及把人工结果和裁判对比。
 
 python -m src.blind export --n 50 --seed 1 --out blind/round1/
+python -m src.blind export --design outcome --per-part 15 --seed 20261112 --out blind/round1/   # 按裁判结果分两部分抽
 python -m src.blind compare blind/round1/key.json <导出的 JSON> [--judge-prompt prompts/judge_v2.md] [--out 报告.md]
 
 网页是一个自带全部内容的 HTML 文件，不依赖网络：Markdown 由 Python 的 markdown 库预先转成 HTML，
@@ -69,6 +70,42 @@ def sample_calls(rows: list, n: int, seed: int) -> list:
     return picked
 
 
+def group_name(skill_file: str, model_name: str) -> str:
+    sg = skill_group(skill_file)
+    sg = sg[len("skills/"):-len(".md")] if sg.startswith("skills/") and sg.endswith(".md") else sg
+    return f"{sg} × {model_name}"
+
+
+def sample_by_outcome(rows: list, per_part: int, seed: int, max_per_item: int = 3) -> list:
+    """按裁判结果分两部分各抽 per_part 份：
+    fail = 知识不通过，或至少一个卡点问题没答上；pass = 知识通过且卡点全部答上。
+    rows 每个元素要有 id、item_id、group、course、part。先抽 fail（通常更少），再抽 pass；
+    每次在该部分里挑使（本部分该组已抽数 + 本部分该课程已抽数）最小的，再看（组 × 课程）格子、该条目已抽数，
+    最后随机；同一条目两部分合计最多 max_per_item 份。"""
+    rng = random.Random(seed)
+    item_cnt: Counter = Counter()
+    picked, used = [], set()
+    for part in ("fail", "pass"):
+        pool = sorted((r for r in rows if r["part"] == part), key=lambda r: r["id"])
+        cg, cc, cell = Counter(), Counter(), Counter()
+        for _ in range(per_part):
+            cands = [r for r in pool if r["id"] not in used and item_cnt[r["item_id"]] < max_per_item]
+            if not cands:
+                raise UsageError(f"{part} 部分可抽的回答不够 {per_part} 份")
+            keyed = [((cg[r["group"]] + cc[r["course"]], cell[(r["group"], r["course"])], item_cnt[r["item_id"]]), r)
+                     for r in cands]
+            best = min(k for k, _ in keyed)
+            r = rng.choice([r for k, r in keyed if k == best])
+            picked.append(r)
+            used.add(r["id"])
+            item_cnt[r["item_id"]] += 1
+            cg[r["group"]] += 1
+            cc[r["course"]] += 1
+            cell[(r["group"], r["course"])] += 1
+    rng.shuffle(picked)
+    return picked
+
+
 # ---------------- Markdown + 公式 ----------------
 
 _MATH_RE = re.compile(r"\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
@@ -113,7 +150,31 @@ def cmd_export(args) -> int:
         if r["item_id"] in items_by_id]
     if not rows:
         raise UsageError("数据库里没有可抽的回答")
-    picked = sample_calls(rows, args.n, args.seed)
+    meta = {}
+    if args.design == "outcome":
+        jcfg = judge_model_cfg(cfg)
+        prompt = load_prompt(Path(args.judge_prompt))
+        cand = []
+        for r in rows:
+            it = items_by_id[r["item_id"]]
+            j = conn.execute(
+                "SELECT id, status, knowledge_pass, gate_num, gate_den FROM judgments WHERE id = (SELECT max(id) FROM judgments"
+                " WHERE call_id=? AND judge_model_name=? AND prompt_sha256=? AND rubric_sha256=?)",
+                (r["id"], jcfg["name"], prompt.sha256, rubric_hash(it))).fetchone()
+            if j is None or j["status"] != "ok":   # 没评过、待复核、失败的不抽
+                continue
+            part = "pass" if j["knowledge_pass"] and j["gate_num"] == j["gate_den"] else "fail"
+            cand.append({**dict(r), "group": group_name(r["skill_file"], r["model_name"]), "course": it["course"],
+                         "part": part, "judgment_id": j["id"]})
+        picked = sample_by_outcome(cand, args.per_part, args.seed)
+        meta = {"design": "outcome", "per_part": args.per_part, "max_per_item": 3,
+                "judge_model_name": jcfg["name"], "judge_prompt": prompt.rel, "judge_prompt_sha256": prompt.sha256,
+                "pool": {p: sum(c["part"] == p for c in cand) for p in ("fail", "pass")}}
+    else:
+        if args.n is None:
+            raise UsageError("--design condition 需要 --n")
+        picked = sample_calls(rows, args.n, args.seed)
+        meta = {"design": "condition"}
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -139,6 +200,9 @@ def cmd_export(args) -> int:
                     "rubric_sha256": rubric_hash(it),
                     "gate_ids": [q["id"] for q in it["gate_questions"]],
                     "step_ids": [s["id"] for s in it["recommended_steps"]]}
+        if meta["design"] == "outcome":
+            key[bid].update({"group": r["group"], "course": r["course"], "part": r["part"],
+                             "judgment_id": r["judgment_id"]})
 
     round_name = out.name or "round"
     data_json = json.dumps({"round": round_name, "entries": entries}, ensure_ascii=False)
@@ -152,7 +216,8 @@ def cmd_export(args) -> int:
     forbidden = set()
     for m in cfg.get("models") or []:
         forbidden |= {m.get("name", ""), m.get("model_id", "")}
-    forbidden |= {r["skill_file"] for r in rows} | {Path(r["skill_file"]).stem for r in rows} | {"general_v1"}
+    forbidden |= {r["skill_file"] for r in rows} | {Path(r["skill_file"]).stem for r in rows}
+    forbidden |= {"general_v1", "original_eval"}
     forbidden |= set(items_by_id)
     forbidden.discard("")
     hits = sorted(t for t in forbidden if t in page)
@@ -163,13 +228,22 @@ def cmd_export(args) -> int:
     (out / "key.json").write_text(json.dumps({
         "round": round_name, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "n": len(picked), "seed": args.seed, "items_file": items_rel, "storage_key": storage_key,
-        "key": key}, ensure_ascii=False, indent=2), encoding="utf-8")
+        "sampling": meta, "key": key}, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    cond = Counter((skill_group(key[b]["skill_file"]), key[b]["model_name"]) for b in key)
-    print(f"抽了 {len(picked)} 份（要求 {args.n}），覆盖 {len({v['item_id'] for v in key.values()})} 个条目"
+    want = args.n if meta["design"] == "condition" else 2 * args.per_part
+    print(f"抽了 {len(picked)} 份（要求 {want}），种子 {args.seed}，覆盖 {len({v['item_id'] for v in key.values()})} 个条目"
           f"（库里共 {len({r['item_id'] for r in rows})} 个）")
-    for (sg, m), c in sorted(cond.items()):
-        print(f"  {sg} × {m}：{c} 份")
+    cond = Counter(group_name(key[b]["skill_file"], key[b]["model_name"]) for b in key)
+    for g, c in sorted(cond.items()):
+        print(f"  {g}：{c} 份")
+    if meta["design"] == "outcome":
+        print(f"  可抽池子：fail {meta['pool']['fail']} 份，pass {meta['pool']['pass']} 份")
+        for f in ("part", "course"):
+            print(f"  按{'部分' if f == 'part' else '课程'}：" + "，".join(f"{k} {v}" for k, v in sorted(Counter(x[f] for x in key.values()).items())))
+        print("  部分 × 组：" + "，".join(f"{p}/{g} {v}" for (p, g), v in sorted(Counter((x["part"], x["group"]) for x in key.values()).items())))
+        print("  部分 × 课程：" + "，".join(f"{p}/{c} {v}" for (p, c), v in sorted(Counter((x["part"], x["course"]) for x in key.values()).items())))
+        print(f"  同一条目最多 {max(Counter(x['item_id'] for x in key.values()).values())} 份")
+    print(f"要判的卡点问题 {sum(len(x['gate_ids']) for x in key.values())} 个，推荐步骤 {sum(len(x['step_ids']) for x in key.values())} 个")
     print(f"网页：{_rel(out / 'index.html')}（{(out / 'index.html').stat().st_size // 1024} KB）")
     print(f"对应表：{_rel(out / 'key.json')}（不要打开它，盲打完再用）")
     print(f"公式转换失败 {n_math_fail} 处（这些原样显示 TeX 源码）；页面里搜不到 Skill 文件名、模型名、条目 id")
@@ -402,7 +476,11 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     e = sub.add_parser("export", help="抽样并生成盲打网页")
-    e.add_argument("--n", type=int, required=True)
+    e.add_argument("--design", choices=["condition", "outcome"], default="condition",
+                   help="condition：按（Skill 组 × 被测模型）轮流抽（默认）；outcome：按裁判结果分两部分各抽 --per-part 份")
+    e.add_argument("--n", type=int, help="--design condition 时抽几份")
+    e.add_argument("--per-part", type=int, default=15, help="--design outcome 时每部分抽几份，默认 15")
+    e.add_argument("--judge-prompt", default="prompts/judge_v2.md", help="--design outcome 时按哪版裁判结果分部分")
     e.add_argument("--seed", type=int, default=1)
     e.add_argument("--out", required=True)
     e.add_argument("--items", default="data/items.jsonl")

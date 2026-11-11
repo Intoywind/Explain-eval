@@ -175,14 +175,16 @@ python -m src.judge --repeat 30 --seed 20261111 --prompt prompts/judge_v2.md   #
 ## 人工盲打
 
 ```bash
-python -m src.blind export --n 50 --seed 1 --out blind/round1/
+python -m src.blind export --design outcome --per-part 15 --seed 20261112 --out blind/round1/   # 正式盲标包
+python -m src.blind export --n 50 --seed 1 --out blind/test/                                     # 按条件轮流抽
 python -m src.blind compare blind/round1/key.json ~/Downloads/blind_round1_xxx.json
 ```
 
 - `index.html` 是单文件网页，不依赖网络，直接双击打开即可。Markdown 和公式已预先转好（公式用浏览器原生的 MathML 显示，转不了的原样显示 TeX）。
 - 页面不显示 Skill、被测模型、条目 id、裁判结果、卡点问题出处；对应关系只在 `key.json` 里，打分完再用。
 - 先填“看懂了没有”，填完才显示卡点问题；推荐步骤默认折叠、选填。进度自动存在浏览器本地；“导出结果”下载 JSON。
-- 抽样：轮流按（Skill 组 × 被测模型）取，每次挑这个条件下被抽次数最少的条目，尽量让每个条目、每份 Skill 都抽到。
+- 抽样（`--design condition`，默认）：轮流按（Skill 组 × 被测模型）取，每次挑这个条件下被抽次数最少的条目，尽量让每个条目、每份 Skill 都抽到。
+- 抽样（`--design outcome`）：按 `--judge-prompt` 那版裁判的当前结果分两部分，各抽 `--per-part` 份：fail = 知识不通过或至少一个卡点问题没答上，pass = 知识通过且卡点全答上。先抽 fail 再抽 pass；每次挑使（本部分该组已抽数 + 本部分该课程已抽数）最小的回答，再看（组 × 课程）格子和该条目已抽数，并列时用种子随机；同一条目两部分合计最多 3 份。没评过或待复核的回答不抽。30 份顺序打乱；部分、组、课程和裁判记录 id 只写在 `key.json`。
 - `compare` 输出 Markdown（默认写到 key.json 旁边的 `compare.md`）：逐问题一致率和 Cohen's kappa、每份回答的卡点分对比（裁判判知识不通过的单列）、逐步骤一致率和 kappa、全部分歧清单、总体判断 × 卡点分交叉表、分歧偏向。
 
 ## 两份 Skill 的比较报告
@@ -203,7 +205,7 @@ python -m src.report --a skills/general_v1.md --b original_eval --model gpt-6.1-
 python -m src.summary --judge-prompt prompts/judge_v2.md --out reports/
 ```
 
-- 输出 `reports/summary__judge_v2.md`：各组份数；知识通过率、没答全比例、卡点分和步骤分均值（按回答、按条目两种）与分布；逐条目三组对比；知识不通过清单；needs_review 和失败清单；“清单外”备注；gaps 的 severity 分布；裁判稳定性（两遍的一致率和 kappa）；COMP original_eval 回答里要文件路径、“待原题补齐”“非历年真题”的份数和原句；实际花费。
+- 输出 `reports/summary__judge_v2.md`：各组份数；知识通过率、没答全比例、卡点分和步骤分均值（按回答、按条目两种）与分布；两份 Skill × 两档模型的 2×2 表；同一模型下两份 Skill 逐条目的升降条数；ECON-003 按新条目重判前后的变化；逐条目三组对比；知识不通过清单；needs_review 和失败清单；“清单外”备注；gaps 的 severity 分布；裁判稳定性（两遍的一致率和 kappa）；COMP original_eval 回答里要文件路径、“待原题补齐”“非历年真题”的份数和原句；实际花费。
 - 只用 `judgments` 表里的正式评分；第二遍和验收样例不进分数。每个数字后的 [Qn] 指向文末附录的 SQL。
 
 ## 测试
